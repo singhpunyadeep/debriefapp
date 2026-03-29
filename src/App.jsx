@@ -17,9 +17,6 @@ const avatarBg = name => { let h=0; for(const c of name) h=(h*31+c.charCodeAt(0)
 const initials = n => n.trim().split(/\s+/).map(w=>w[0].toUpperCase()).slice(0,2).join("");
 const fmt = iso => new Date(iso).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"});
 const fmtShort = iso => new Date(iso).toLocaleDateString("en-GB",{day:"numeric",month:"short"});
-
-// FIX #4: isThisWeek was broken on Sundays (getDay()=0 made week start "tomorrow").
-// Now treats Sunday as day 7 so Monday is always the correct week start.
 const isThisWeek = iso => {
   const d=new Date(iso), now=new Date(), s=new Date(now);
   const day = now.getDay() || 7;
@@ -36,8 +33,13 @@ const isNextWeek = iso => {
 };
 const isOverdue = iso => iso && new Date(iso)<new Date() && !isThisWeek(iso);
 
-// FIX #1: claude() now checks response status and throws on failure instead of
-// crashing with "cannot read .content of undefined".
+// ─── RAG helpers ──────────────────────────────────────────────────────────────
+const RAG_LABELS = { red:"Red", amber:"Amber", green:"Green" };
+const RAG_COLORS = { red:T.danger, amber:T.warning, green:T.success };
+const RagDot = ({rag, size=10}) => rag
+  ? <span style={{display:"inline-block",width:size,height:size,borderRadius:"50%",background:RAG_COLORS[rag],flexShrink:0}} title={RAG_LABELS[rag]}/>
+  : null;
+
 const claude = async (prompt, maxTokens=1500) => {
   const r = await fetch("/api/claude", {
     method:"POST", headers:{"Content-Type":"application/json"},
@@ -53,8 +55,6 @@ const parseJsonSafe = raw => {
   catch { const m=raw.match(/[\[{][\s\S]*[\]}]/); if(m){try{return JSON.parse(m[0]);}catch{}} return null; }
 };
 
-// FIX #12: Sanitise HTML before dangerouslySetInnerHTML to prevent XSS from
-// AI-generated content. Strips script/style tags and event attributes.
 const sanitiseHtml = html =>
   html
     .replace(/<script[\s\S]*?<\/script>/gi,"")
@@ -67,8 +67,6 @@ const sanitiseHtml = html =>
 const db = {
   async getUser() { const {data:{user}}=await supabase.auth.getUser(); return user; },
 
-  // FIX #2: loadAll now wraps each query in individual try/catch so a single
-  // missing table or RLS error doesn't hang the entire app on a null data state.
   async loadAll(userId) {
     const safe = async (fn) => { try { return await fn(); } catch { return null; } };
     const [
@@ -91,6 +89,9 @@ const db = {
     return {
       projects: (projects||[]).map(p=>({
         ...p, statusUpdated:p.status_updated_at,
+        // FEATURE 1: include rag fields
+        rag: p.rag || null,
+        ragOverride: p.rag_override || false,
         notes:(notes||[]).filter(n=>n.project_id===p.id).map(n=>({
           ...n, selfTagged:n.self_tagged,
           taggedMembers:(noteMembers||[]).filter(nm=>nm.note_id===n.id).map(nm=>nm.member_id),
@@ -110,15 +111,16 @@ const db = {
 
   async createProject(userId,name) {
     const {data}=await supabase.from('projects').insert({user_id:userId,name}).select().single();
-    return {...data,notes:[],decisions:[],commitments:[],risks:[],status:null,statusUpdated:null};
+    return {...data,notes:[],decisions:[],commitments:[],risks:[],status:null,statusUpdated:null,rag:null,ragOverride:false};
   },
   async updateProjectStatus(projectId,status) {
     await supabase.from('projects').update({status,status_updated_at:new Date().toISOString()}).eq('id',projectId);
   },
+  // FEATURE 1: save RAG — rag_override=true means user manually set it
+  async updateProjectRag(projectId, rag, isOverride=false) {
+    await supabase.from('projects').update({rag, rag_override: isOverride}).eq('id', projectId);
+  },
 
-  // FIX #3: deleteProject now explicitly deletes all child records before
-  // deleting the project itself, to avoid orphaned rows if ON DELETE CASCADE
-  // is not set in the Supabase schema.
   async deleteProject(projectId) {
     await Promise.all([
       supabase.from('risks').delete().eq('project_id',projectId),
@@ -126,7 +128,6 @@ const db = {
       supabase.from('decisions').delete().eq('project_id',projectId),
       supabase.from('todos').update({project_id:null}).eq('project_id',projectId),
     ]);
-    // Delete note_members for notes belonging to this project
     const {data:projectNotes}=await supabase.from('notes').select('id').eq('project_id',projectId);
     if(projectNotes?.length>0){
       const noteIds=projectNotes.map(n=>n.id);
@@ -192,11 +193,41 @@ const db = {
   async upsertHomeSummary(userId,summary) { await supabase.from('home_summaries').upsert({user_id:userId,summary,updated_at:new Date().toISOString()}); },
   async setName(userId,name) { await supabase.from('profiles').upsert({id:userId,name}); },
   async completeTour(userId) { await supabase.from('profiles').update({tour_done:true}).eq('id',userId); },
+
+  // FEATURE 4: share token ops — uses a 'share_tokens' table
+  async createShareToken(userId, memberId) {
+    const token = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+    const {data} = await supabase.from('share_tokens')
+      .upsert({user_id:userId, member_id:memberId, token}, {onConflict:'member_id'})
+      .select().single();
+    return data?.token || token;
+  },
+  async getShareData(token) {
+    // Fetch token row (no auth needed — public read by token)
+    const {data:tokenRow} = await supabase.from('share_tokens').select('*').eq('token',token).maybeSingle();
+    if(!tokenRow) return null;
+    const {member_id, user_id} = tokenRow;
+    const [
+      {data:member},
+      {data:todos},
+      {data:projects},
+    ] = await Promise.all([
+      supabase.from('members').select('*').eq('id',member_id).single(),
+      supabase.from('todos').select('*').eq('user_id',user_id).eq('member_id',member_id).order('created_at'),
+      supabase.from('projects').select('id,name').eq('user_id',user_id),
+    ]);
+    return {
+      member,
+      todos: (todos||[]).map(t=>({...t,dueDate:t.due_date,projectId:t.project_id})),
+      projects: projects||[],
+    };
+  },
+  async toggleSharedTodo(todoId, done) {
+    await supabase.from('todos').update({done, done_at:done?new Date().toISOString():null}).eq('id',todoId);
+  },
 };
 
 // ─── UI Primitives ────────────────────────────────────────────────────────────
-
-// FIX #12: MD renderer now sanitises output before setting innerHTML.
 const MD = ({content,small}) => {
   const fs=small?"13px":"14px";
   const css=`.md h1{font-size:17px;font-weight:700;margin:12px 0 5px;font-family:${T.serif};color:${T.ink};text-align:left}.md h2{font-size:15px;font-weight:700;margin:10px 0 4px;font-family:${T.serif};color:${T.ink};text-align:left}.md h3{font-size:14px;font-weight:600;margin:8px 0 3px;color:${T.ink};text-align:left}.md strong{font-weight:600}.md ul,.md ol{margin:4px 0;padding-left:18px;text-align:left}.md li{margin:2px 0;font-size:${fs};text-align:left}.md ul li{list-style-type:disc}.md ol li{list-style-type:decimal}.md p{margin:4px 0;font-size:${fs};line-height:1.6;text-align:left;color:${T.ink}}`;
@@ -265,7 +296,6 @@ const ScoreBadge = ({score}) => {
   return <span style={{background:c+"14",color:c,border:`1px solid ${c}30`,borderRadius:2,padding:"2px 8px",fontSize:"12px",fontWeight:700}}>{score}/10</span>;
 };
 
-// FIX #10: Toast component replaces alert() for clipboard feedback.
 const Toast = ({message,onDone}) => {
   useEffect(()=>{const t=setTimeout(onDone,2200);return()=>clearTimeout(t);},[]);
   return (
@@ -274,6 +304,347 @@ const Toast = ({message,onDone}) => {
     </div>
   );
 };
+
+// ─── FEATURE 1: RAG Override Picker ──────────────────────────────────────────
+const RagPicker = ({current, onSelect, onClose}) => (
+  <div style={{position:"fixed",inset:0,zIndex:500,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={onClose}>
+    <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:4,padding:"16px",boxShadow:"0 4px 20px rgba(0,0,0,0.12)",minWidth:200}} onClick={e=>e.stopPropagation()}>
+      <p style={{margin:"0 0 10px",fontSize:"11px",fontWeight:700,letterSpacing:"0.07em",textTransform:"uppercase",color:T.mid}}>Set Health Status</p>
+      {["green","amber","red"].map(r=>(
+        <button key={r} onClick={()=>{onSelect(r);onClose();}} style={{display:"flex",alignItems:"center",gap:10,width:"100%",padding:"8px 10px",background:current===r?T.accentLight:"transparent",border:"none",borderRadius:2,cursor:"pointer",fontFamily:T.sans,marginBottom:4}}>
+          <RagDot rag={r} size={12}/>
+          <span style={{fontSize:"13px",color:T.ink,fontWeight:current===r?600:400}}>{RAG_LABELS[r]}</span>
+          {current===r&&<span style={{marginLeft:"auto",fontSize:"11px",color:T.accentMid}}>current</span>}
+        </button>
+      ))}
+    </div>
+  </div>
+);
+
+// ─── FEATURE 2: Pre-meeting Briefing Modal ────────────────────────────────────
+const PreMeetingBriefing = ({project, todos, members, onClose}) => {
+  const [briefing, setBriefing] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  useEffect(()=>{
+    const generate = async () => {
+      try {
+        const lastNote = [...(project.notes||[])].sort((a,b)=>new Date(b.date)-new Date(a.date))[0];
+        const openTasks = todos.filter(t=>!t.done && t.projectId===project.id);
+        const openCommitments = (project.commitments||[]).filter(c=>c.status==="open");
+        const openDecisions = (project.decisions||[]).slice(-5);
+        const activeRisks = (project.risks||[]).filter(r=>!r.dismissed);
+
+        const prompt = `You are preparing someone for a meeting on the project "${project.name}". Write a concise pre-meeting briefing. Be direct — no fluff.
+
+Format exactly:
+## What happened last time
+[One paragraph summary of the last meeting. If no notes, say "No previous notes."]
+
+## Open tasks going in
+[Bullet list of open tasks. If none, say "None."]
+
+## Pending decisions
+[Bullet list of unresolved decisions. If none, say "None."]
+
+## Watch out for
+[1-3 bullet points: active risks, stale commitments, or things that could derail this meeting. Be specific.]
+
+## Your focus for this meeting
+[One sentence — what the person should aim to achieve or clarify today.]
+
+---
+Last meeting notes:
+${lastNote ? `[${fmt(lastNote.date)}]\n${lastNote.summary}` : "No previous meeting notes."}
+
+Open tasks (${openTasks.length}):
+${openTasks.length > 0 ? openTasks.map(t=>`- ${t.text}${t.dueDate ? ` (due ${fmtShort(t.dueDate)})` : ""}${isOverdue(t.dueDate)?" OVERDUE":""}`).join("\n") : "None"}
+
+Open commitments (${openCommitments.length}):
+${openCommitments.length > 0 ? openCommitments.map(c=>{const m=members.find(mm=>mm.id===c.member_id); return `- ${m?.name||"Someone"}: ${c.commitment_text}`;}).join("\n") : "None"}
+
+Recent decisions:
+${openDecisions.length > 0 ? openDecisions.map(d=>`- ${d.decision_text}`).join("\n") : "None"}
+
+Active risks:
+${activeRisks.length > 0 ? activeRisks.map(r=>`- [${r.severity}] ${r.risk_text}`).join("\n") : "None"}`;
+
+        const result = await claude(prompt, 800);
+        setBriefing(result);
+      } catch(e) {
+        setBriefing("Failed to generate briefing. Please try again.");
+      } finally {
+        setLoading(false);
+      }
+    };
+    generate();
+  }, []);
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.55)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+      <div style={{background:T.white,borderRadius:4,width:"100%",maxWidth:580,maxHeight:"90vh",overflowY:"auto",fontFamily:T.sans}}>
+        <div style={{padding:"18px 20px 14px",borderBottom:`1px solid ${T.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,background:T.white,zIndex:1}}>
+          <div>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <span style={{fontSize:"16px"}}>⚡</span>
+              <h2 style={{margin:0,fontFamily:T.serif,fontSize:"17px",fontWeight:700,color:T.ink}}>Pre-meeting Briefing</h2>
+            </div>
+            <p style={{margin:"2px 0 0",fontSize:"12px",color:T.muted}}>{project.name}</p>
+          </div>
+          <button onClick={onClose} style={{background:"none",border:"none",color:T.muted,fontSize:20,cursor:"pointer",padding:0}}>✕</button>
+        </div>
+        <div style={{padding:"18px 20px"}}>
+          {loading
+            ? <div style={{display:"flex",flexDirection:"column",gap:8,alignItems:"center",padding:"32px 0"}}>
+                <div style={{width:28,height:28,border:`2px solid ${T.border}`,borderTop:`2px solid ${T.accent}`,borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>
+                <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+                <p style={{color:T.muted,fontSize:"13px",margin:0}}>Preparing your briefing…</p>
+              </div>
+            : <MD content={briefing}/>
+          }
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ─── FEATURE 4: Shared Task View (no-login public page) ───────────────────────
+const SharedTaskView = ({token}) => {
+  const [shareData, setShareData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [todos, setTodos] = useState([]);
+  const [toast, setToast] = useState(null);
+
+  useEffect(()=>{
+    db.getShareData(token).then(d=>{
+      if(d){ setShareData(d); setTodos(d.todos); }
+      setLoading(false);
+    });
+  },[token]);
+
+  const toggle = async (id) => {
+    const todo = todos.find(t=>t.id===id);
+    if(!todo) return;
+    const nowDone = !todo.done;
+    await db.toggleSharedTodo(id, nowDone);
+    setTodos(ts => ts.map(t=>t.id===id ? {...t,done:nowDone} : t));
+    setToast(nowDone ? "Marked done ✓" : "Marked pending");
+  };
+
+  if(loading) return (
+    <Shell maxW={500}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"60vh"}}>
+        <p style={{color:T.muted}}>Loading…</p>
+      </div>
+    </Shell>
+  );
+
+  if(!shareData) return (
+    <Shell maxW={500}>
+      <div style={{paddingTop:60,textAlign:"center"}}>
+        <Logo/>
+        <p style={{color:T.mid,marginTop:24,fontSize:"14px"}}>This link is invalid or has expired.</p>
+      </div>
+    </Shell>
+  );
+
+  const {member, projects} = shareData;
+  const pending = todos.filter(t=>!t.done);
+  const done = todos.filter(t=>t.done);
+  const overdue = pending.filter(t=>isOverdue(t.dueDate));
+
+  return (
+    <Shell maxW={560}>
+      {toast&&<Toast message={toast} onDone={()=>setToast(null)}/>}
+      <div style={{marginBottom:24,paddingBottom:14,borderBottom:`1px solid ${T.border}`}}>
+        <Logo/>
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:20}}>
+        <Av name={member.name} size={44}/>
+        <div>
+          <h1 style={{margin:0,fontFamily:T.serif,fontSize:"20px",fontWeight:700,color:T.ink}}>{member.name}</h1>
+          {member.role&&<p style={{margin:"2px 0 0",fontSize:"13px",color:T.mid}}>{member.role}</p>}
+        </div>
+      </div>
+
+      {overdue.length>0&&(
+        <Card style={{borderLeft:`3px solid ${T.danger}`,marginBottom:10}}>
+          <p style={{margin:"0 0 8px",fontSize:"11px",fontWeight:700,letterSpacing:"0.07em",textTransform:"uppercase",color:T.danger}}>Overdue ({overdue.length})</p>
+          {overdue.map(t=>{
+            const proj = projects.find(p=>p.id===t.projectId);
+            return (
+              <div key={t.id} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"8px 0",borderBottom:`1px solid ${T.border}`}}>
+                <input type="checkbox" checked={!!t.done} onChange={()=>toggle(t.id)} style={{marginTop:3,accentColor:T.accent,cursor:"pointer",flexShrink:0}}/>
+                <div style={{flex:1,minWidth:0}}>
+                  <p style={{margin:0,fontSize:"13px",color:T.ink,textDecoration:t.done?"line-through":"none",lineHeight:1.5}}>{t.text}</p>
+                  <div style={{display:"flex",gap:5,marginTop:3,flexWrap:"wrap"}}>
+                    {proj&&<Tag color={T.accentMid}>{proj.name}</Tag>}
+                    <span style={{fontSize:"11px",color:T.danger,fontWeight:600}}>Overdue · {fmtShort(t.dueDate)}</span>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </Card>
+      )}
+
+      <Card>
+        <p style={{margin:"0 0 8px",fontSize:"11px",fontWeight:700,letterSpacing:"0.07em",textTransform:"uppercase",color:T.mid}}>Open Tasks ({pending.filter(t=>!isOverdue(t.dueDate)).length})</p>
+        {pending.filter(t=>!isOverdue(t.dueDate)).length===0
+          ? <p style={{color:T.muted,fontSize:"13px",margin:0}}>No open tasks.</p>
+          : pending.filter(t=>!isOverdue(t.dueDate)).map(t=>{
+              const proj = projects.find(p=>p.id===t.projectId);
+              return (
+                <div key={t.id} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"8px 0",borderBottom:`1px solid ${T.border}`}}>
+                  <input type="checkbox" checked={!!t.done} onChange={()=>toggle(t.id)} style={{marginTop:3,accentColor:T.accent,cursor:"pointer",flexShrink:0}}/>
+                  <div style={{flex:1,minWidth:0}}>
+                    <p style={{margin:0,fontSize:"13px",color:T.ink,lineHeight:1.5}}>{t.text}</p>
+                    <div style={{display:"flex",gap:5,marginTop:3,flexWrap:"wrap"}}>
+                      {proj&&<Tag color={T.accentMid}>{proj.name}</Tag>}
+                      {t.dueDate&&<span style={{fontSize:"11px",color:T.muted}}>{fmtShort(t.dueDate)}</span>}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+      </Card>
+
+      {done.length>0&&(
+        <Card style={{marginTop:6}}>
+          <p style={{margin:"0 0 8px",fontSize:"11px",fontWeight:700,letterSpacing:"0.07em",textTransform:"uppercase",color:T.muted}}>Completed ({done.length})</p>
+          {done.map(t=>(
+            <div key={t.id} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"6px 0",borderBottom:`1px solid ${T.border}`}}>
+              <input type="checkbox" checked onChange={()=>toggle(t.id)} style={{marginTop:3,accentColor:T.accent,cursor:"pointer",flexShrink:0}}/>
+              <p style={{margin:0,fontSize:"13px",color:T.muted,textDecoration:"line-through",lineHeight:1.5}}>{t.text}</p>
+            </div>
+          ))}
+        </Card>
+      )}
+
+      <p style={{textAlign:"center",fontSize:"11px",color:T.muted,marginTop:24}}>Powered by Debrief</p>
+    </Shell>
+  );
+};
+
+// ─── FEATURE 5: Meeting Templates ────────────────────────────────────────────
+const TEMPLATES = [
+  {
+    id:"standup",
+    label:"Standup",
+    icon:"☀️",
+    structure:`STANDUP – [Date]
+Attendees: 
+
+YESTERDAY:
+- 
+
+TODAY:
+- 
+
+BLOCKERS:
+- 
+
+@[YourName] action items:
+- `,
+  },
+  {
+    id:"client_call",
+    label:"Client Call",
+    icon:"📞",
+    structure:`CLIENT CALL – [Date]
+Client: 
+Attendees: 
+
+AGENDA COVERED:
+- 
+
+KEY DECISIONS:
+- 
+
+CLIENT FEEDBACK:
+- 
+
+NEXT STEPS:
+- @[YourName] to 
+- Client to 
+
+FOLLOW-UP DATE: `,
+  },
+  {
+    id:"sprint_review",
+    label:"Sprint Review",
+    icon:"🔄",
+    structure:`SPRINT REVIEW – [Date]
+Sprint: 
+Attendees: 
+
+COMPLETED:
+- 
+
+NOT COMPLETED (carried over):
+- 
+
+DEMO FEEDBACK:
+- 
+
+RETROSPECTIVE:
+- What went well: 
+- What didn't: 
+- Action: @[YourName] to 
+
+NEXT SPRINT PRIORITIES:
+1. 
+2. 
+3. `,
+  },
+  {
+    id:"one_on_one",
+    label:"1:1",
+    icon:"👥",
+    structure:`1:1 – [Date]
+With: 
+
+THEIR UPDATE:
+- 
+
+CONCERNS / BLOCKERS RAISED:
+- 
+
+FEEDBACK GIVEN:
+- 
+
+COMMITMENTS MADE:
+- [Name] to 
+- [Name] to 
+
+NEXT 1:1: `,
+  },
+  {
+    id:"board_update",
+    label:"Board / Exec",
+    icon:"📊",
+    structure:`BOARD / EXEC UPDATE – [Date]
+Attendees: 
+
+PRESENTED:
+- 
+
+KEY DECISIONS MADE:
+- 
+
+RISKS FLAGGED:
+- 
+
+ASKS / APPROVALS:
+- 
+
+ACTION OWNERS:
+- @[YourName] to 
+- 
+
+NEXT REVIEW: `,
+  },
+];
 
 // ─── Bottom Search / Ask Bar ───────────────────────────────────────────────────
 const BottomSearchBar = ({onClick}) => (
@@ -401,20 +772,15 @@ const TOUR_STEPS=[
   {target:"tour-nav",title:"Track your whole team",body:"Go to Team to add colleagues. Tag them in notes and Debrief builds an intelligence profile on each person across all projects."},
 ];
 
-// FIX #11: Tour tooltip now uses position:fixed consistently on desktop so it
-// doesn't mix absolute/fixed coordinate systems. On mobile it uses a bottom sheet
-// (unchanged). The desktop variant calculates viewport position correctly.
 const Tour=({onDone})=>{
   const [step,setStep]=useState(0);
   const [pos,setPos]=useState(null);
   const isMobile=window.innerWidth<600;
-
   useEffect(()=>{
     const position=()=>{
       const el=document.getElementById(TOUR_STEPS[step].target);
       if(!el)return;
       const r=el.getBoundingClientRect();
-      // Use viewport coords for position:fixed (no scrollY offset needed)
       setPos({top:r.bottom+10, left:Math.min(r.left, window.innerWidth-280)});
     };
     position();
@@ -422,11 +788,9 @@ const Tour=({onDone})=>{
     window.addEventListener('scroll',position,true);
     return()=>{window.removeEventListener('resize',position);window.removeEventListener('scroll',position,true);};
   },[step]);
-
   const next=()=>{if(step<TOUR_STEPS.length-1)setStep(s=>s+1);else onDone();};
   const prev=()=>{if(step>0)setStep(s=>s-1);};
   const curr=TOUR_STEPS[step];
-
   if(isMobile) return (
     <>
       <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:999}} onClick={onDone}/>
@@ -447,7 +811,6 @@ const Tour=({onDone})=>{
       </div>
     </>
   );
-
   return (
     <>
       <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.25)",zIndex:999}} onClick={onDone}/>
@@ -470,17 +833,25 @@ const Tour=({onDone})=>{
   );
 };
 
-// ─── Note Textarea ────────────────────────────────────────────────────────────
+// ─── Note Textarea (FEATURE 5: templates added) ───────────────────────────────
 const NoteTextarea=({onSubmit,onCancel,loading,error,projectName,meName,members})=>{
   const ref=useRef(null);
   const [show,setShow]=useState(false);
   const [q,setQ]=useState("");
   const [dropPos,setDropPos]=useState(0);
+  const [showTemplates,setShowTemplates]=useState(false);
   const all=useMemo(()=>[{id:"me",name:meName,isSelf:true},...members.map(m=>({...m,isSelf:false}))],[meName,members]);
   const filtered=all.filter(m=>m.name.toLowerCase().includes(q.toLowerCase()));
   const handleChange=e=>{const val=e.target.value,cur=e.target.selectionStart,before=val.slice(0,cur);const match=before.match(/@([\w][\w ]*)$/);if(match){setQ(match[1]);setShow(true);setDropPos(cur-match[0].length);}else setShow(false);};
   const insert=name=>{const ta=ref.current,val=ta.value,before=val.slice(0,dropPos),rest=val.slice(dropPos).replace(/^@[\w ]*/,"");ta.value=before+`@${name}`+(rest.startsWith(" ")?rest:" "+rest);setShow(false);ta.focus();};
-  const loadExample=key=>{ref.current.value=key==="meetingNotes"?`Product Planning - Jan 15\nAttendees: Sarah (PM), Mike (Eng), Alex\n- Prioritize mobile app\n- Analytics dashboard to Q2\n- Decision: Push v2 launch to March\nActions: @${meName} review dashboard spec by Jan 20, Sarah finalize roadmap`:`[00:00] Standup. Sarah - dashboard?\n[00:25] Sarah: Auth done, 80% reporting. Ready Thursday.\n[00:45] Blocker: charts broken dark mode.\n[01:00] Mike: I'll help.\n[01:25] @${meName} to send sprint summary by EOD.`;};
+
+  const applyTemplate = (tmpl) => {
+    // Replace [YourName] placeholder with actual name
+    ref.current.value = tmpl.structure.replace(/\[YourName\]/g, meName);
+    setShowTemplates(false);
+    ref.current.focus();
+  };
+
   return (
     <Card>
       <div style={{marginBottom:14}}>
@@ -488,13 +859,26 @@ const NoteTextarea=({onSubmit,onCancel,loading,error,projectName,meName,members}
         <p style={{margin:"2px 0 0",fontSize:"12px",color:T.muted}}>Saving to: {projectName}</p>
       </div>
       <p style={{fontSize:"12px",color:T.muted,margin:"0 0 8px"}}>Type @ to tag people. Decisions, commitments and risks will be auto-extracted.</p>
-      <div style={{display:"flex",gap:6,marginBottom:8,flexWrap:"wrap"}}>
-        {["meetingNotes","transcripts"].map(k=>(
-          <button key={k} onClick={()=>loadExample(k)} style={{padding:"3px 10px",fontSize:"11px",border:`1px solid ${T.border}`,borderRadius:2,background:"transparent",color:T.mid,cursor:"pointer",fontFamily:T.sans}}>{k==="meetingNotes"?"Meeting notes":"Transcript"}</button>
-        ))}
+
+      {/* FEATURE 5: Template picker row */}
+      <div style={{marginBottom:10}}>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+          <span style={{fontSize:"11px",color:T.muted,fontWeight:600,letterSpacing:"0.05em",textTransform:"uppercase"}}>Template:</span>
+          {TEMPLATES.map(tmpl=>(
+            <button key={tmpl.id} onClick={()=>applyTemplate(tmpl)}
+              style={{padding:"3px 10px",fontSize:"11px",border:`1px solid ${T.border}`,borderRadius:2,background:"transparent",color:T.mid,cursor:"pointer",fontFamily:T.sans,display:"flex",alignItems:"center",gap:4}}>
+              <span>{tmpl.icon}</span>{tmpl.label}
+            </button>
+          ))}
+          <button onClick={()=>{ref.current.value="";ref.current.focus();}}
+            style={{padding:"3px 10px",fontSize:"11px",border:`1px solid ${T.border}`,borderRadius:2,background:"transparent",color:T.muted,cursor:"pointer",fontFamily:T.sans}}>
+            Clear
+          </button>
+        </div>
       </div>
+
       <div style={{position:"relative"}}>
-        <textarea ref={ref} onChange={handleChange} placeholder="Paste raw notes, transcript, or bullets…" style={{...inp,height:180,resize:"vertical",lineHeight:1.65}}/>
+        <textarea ref={ref} onChange={handleChange} placeholder="Paste raw notes, transcript, or pick a template above…" style={{...inp,height:200,resize:"vertical",lineHeight:1.65}}/>
         {show&&filtered.length>0&&(
           <div style={{position:"absolute",top:"100%",left:0,right:0,background:T.white,border:`1px solid ${T.border}`,borderRadius:2,boxShadow:"0 4px 12px rgba(0,0,0,0.08)",zIndex:20}}>
             {filtered.map(m=>(
@@ -539,6 +923,15 @@ const TodoItem=({todo,projects,members,onToggle,onDelete,onProjectNav})=>{
 
 // ─── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
+  // FEATURE 4: detect share token from URL query param
+  const shareToken = useMemo(()=>{
+    const p = new URLSearchParams(window.location.search);
+    return p.get("share") || null;
+  },[]);
+
+  // If this is a shared link, render the public view immediately — no auth needed
+  if(shareToken) return <SharedTaskView token={shareToken}/>;
+
   const [userId,setUserId]=useState(null);
   const [data,setData]=useState(null);
   const [showTour,setShowTour]=useState(false);
@@ -569,11 +962,12 @@ export default function App() {
   const [newTodoMemberId,setNewTodoMemberId]=useState("");
   const [todoFilter,setTodoFilter]=useState("pending");
   const [activeProjectTab,setActiveProjectTab]=useState("notes");
-  // FIX #10: toast state replaces alert()
   const [toast,setToast]=useState(null);
+  // FEATURE 1: RAG picker state
+  const [ragPickerProjectId,setRagPickerProjectId]=useState(null);
+  // FEATURE 2: briefing modal state
+  const [showBriefing,setShowBriefing]=useState(false);
 
-  // Store tagged members in a ref so the clarifying-phase finalise
-  // always gets the correct value even across async boundaries (FIX #6 hardening)
   const taggedMembersRef=useRef([]);
   const taggedSelfRef=useRef(false);
 
@@ -604,7 +998,54 @@ export default function App() {
   const handleTourDone=async()=>{setShowTour(false);if(userId)await db.completeTour(userId);};
   const signOut=async()=>{await supabase.auth.signOut();window.location.reload();};
 
-  // ── AI extraction pipeline ──────────────────────────────────────────────────
+  // FEATURE 1: AI suggests RAG on every note save
+  const suggestRag = async (projectId, proj) => {
+    try {
+      // Don't overwrite a user override
+      if(proj.ragOverride) return;
+      const openTasks = todos.filter(t=>!t.done && t.projectId===projectId);
+      const overdueTasks = openTasks.filter(t=>isOverdue(t.dueDate));
+      const activeRisks = (proj.risks||[]).filter(r=>!r.dismissed);
+      const highRisks = activeRisks.filter(r=>r.severity==="high");
+      const openCommitments = (proj.commitments||[]).filter(c=>c.status==="open");
+      const lastNote = [...(proj.notes||[])].sort((a,b)=>new Date(b.date)-new Date(a.date))[0];
+      const daysSinceLastNote = lastNote ? Math.floor((Date.now()-new Date(lastNote.date))/(1000*60*60*24)) : 999;
+
+      const raw = await claude(`Based on this project data, suggest a health status: "red", "amber", or "green". Return ONLY the single word, nothing else.
+
+Rules:
+- red = project is in trouble (multiple high risks, many overdue tasks, stale for 30+ days, critical blockers)
+- amber = needs attention (some overdue tasks, medium risks, open commitments, stale 14+ days)
+- green = on track (tasks current, no major risks, recent activity)
+
+Project: ${proj.name}
+Days since last meeting note: ${daysSinceLastNote}
+Open tasks: ${openTasks.length} (${overdueTasks.length} overdue)
+High severity risks: ${highRisks.length}
+Total active risks: ${activeRisks.length}
+Open commitments: ${openCommitments.length}
+Recent status: ${proj.status ? proj.status.slice(0,300) : "No status yet"}`, 10);
+
+      const rag = raw.trim().toLowerCase().replace(/[^a-z]/g,"");
+      if(["red","amber","green"].includes(rag)){
+        await db.updateProjectRag(projectId, rag, false);
+      }
+    } catch(e) { /* silent — RAG suggestion is non-critical */ }
+  };
+
+  // FEATURE 4: generate share link for a member
+  const generateShareLink = async (memberId) => {
+    if(!userId) return;
+    const token = await db.createShareToken(userId, memberId);
+    const url = `${window.location.origin}${window.location.pathname}?share=${token}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      setToast("Share link copied to clipboard");
+    } catch {
+      setToast("Share link: " + url);
+    }
+  };
+
   const extractIntelligence=async(summary,noteId,projectId,projName,existingNotes)=>{
     try{
       const priorContext=existingNotes.slice(-5).map(n=>n.summary).join("\n\n");
@@ -627,8 +1068,6 @@ ${summary}`,600);
     }catch{return{decisions:[],commitments:[],risks:[],quality:null,contradictions:[]};}
   };
 
-  // FIX #8: generateHomeSummary now fetches fresh data instead of reading the
-  // stale `data` closure, so notes added just before clicking Refresh are included.
   const generateHomeSummary=async()=>{
     if(!userId)return;setHomeLoading(true);
     try{
@@ -744,7 +1183,6 @@ Bullet list of tasks not tied to any project. If none write "None."
     if(!notesVal.trim()){setError("Please enter notes.");return;}
     setNotes(notesVal);setError("");setLoading(true);
     const mentioned=extractMentions(notesVal),selfTagged=meInNotes(notesVal);
-    // FIX #6: Store in refs so finaliseNote always reads correct values
     taggedMembersRef.current=mentioned;
     taggedSelfRef.current=selfTagged;
     setTaggedMembers(mentioned);setTaggedSelf(selfTagged);
@@ -760,7 +1198,6 @@ Bullet list of tasks not tied to any project. If none write "None."
 
   const finaliseNote=async(notesVal,ans,mentionedOvr,selfOvr)=>{
     setLoading(true);setError("");
-    // FIX #6: Fall back to refs if overrides not provided (clarifying-phase path)
     const n=notesVal||notes;
     const mentioned=mentionedOvr??taggedMembersRef.current;
     const selfMentioned=selfOvr??taggedSelfRef.current;
@@ -769,7 +1206,6 @@ Bullet list of tasks not tied to any project. If none write "None."
       const summary=await claude(`Convert to structured summary:\n1. Overview\n2. Key decisions\n3. Action items\n4. Discussion\n5. Next steps\nUse markdown.\n\nNotes:\n${n}${clarifs}`,1200);
 
       const note=await db.createNote(userId,activeProject.id,{raw:n,summary,selfTagged:selfMentioned,taggedMemberIds:mentioned.map(m=>m.id)});
-
       const intel=await extractIntelligence(summary,note.id,activeProject.id,activeProject.name,activeProject.notes);
 
       await Promise.all([
@@ -785,6 +1221,8 @@ Bullet list of tasks not tied to any project. If none write "None."
         const allS=proj.notes.map((nn,i)=>`Meeting ${i+1} (${fmt(nn.date)}):\n${nn.summary}`).join("\n\n");
         const status=await claude(`Latest status for "${proj.name}". Current state, open actions, decisions, blockers, next steps.\n${allS}`,700);
         await db.updateProjectStatus(proj.id,status);
+        // FEATURE 1: suggest RAG after every note save
+        await suggestRag(proj.id, {...proj, notes: proj.notes});
       }
 
       if(selfMentioned)await extractTodosFromNote(summary,activeProject.id);
@@ -823,17 +1261,13 @@ Bullet list of tasks not tied to any project. If none write "None."
     }catch(e){console.error(e);}finally{setEditSaving(false);}
   };
 
-  // FIX #10: shareNote now uses Toast instead of alert()
   const shareNote=async(note,projectName)=>{
     const text=`${projectName} — ${fmt(note.date)}\n\n${note.summary.replace(/[#*]/g,"").trim()}`;
     if(navigator.share){try{await navigator.share({title:`Debrief — ${projectName}`,text});return;}catch{}}
-    try{
-      await navigator.clipboard.writeText(text);
-      setToast("Summary copied to clipboard");
-    }catch{setToast("Copy failed — please copy manually");}
+    try{ await navigator.clipboard.writeText(text); setToast("Summary copied to clipboard"); }
+    catch{ setToast("Copy failed — please copy manually"); }
   };
 
-  // FIX #9: deleteProject now requires confirmation before proceeding.
   const deleteProject=async idx=>{
     const name=projects[idx]?.name||"this project";
     if(!window.confirm(`Delete "${name}"? This will permanently remove all notes, decisions, commitments and risks. This cannot be undone.`))return;
@@ -904,6 +1338,13 @@ Bullet list of tasks not tied to any project. If none write "None."
   if(view==="home") return (
     <Shell>
       {toast&&<Toast message={toast} onDone={()=>setToast(null)}/>}
+      {ragPickerProjectId&&(
+        <RagPicker
+          current={projects.find(p=>p.id===ragPickerProjectId)?.rag}
+          onSelect={async(rag)=>{await db.updateProjectRag(ragPickerProjectId,rag,true);await reload();}}
+          onClose={()=>setRagPickerProjectId(null)}
+        />
+      )}
       <SearchEl/>
       {showTour&&<Tour onDone={handleTourDone}/>}
       <BottomSearchBar onClick={()=>setShowSearch(true)}/>
@@ -953,20 +1394,25 @@ Bullet list of tasks not tied to any project. If none write "None."
           {[...overdueTodos.slice(0,2),...thisWeekTodos.slice(0,3)].map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>)}
           {thisWeekTodos.length===0&&overdueTodos.length===0&&<p style={{fontSize:"12px",color:T.muted,margin:0}}>No tasks due this week.</p>}
         </Card>
+        {/* FEATURE 1: Projects grid now shows RAG dot + click to override */}
         <Card>
           <h3 style={{margin:"0 0 10px",fontSize:"13px",fontWeight:600,color:T.ink}}>Projects <span style={{fontSize:"11px",fontWeight:400,color:T.muted}}>({projects.length})</span></h3>
           {projects.length===0?<p style={{fontSize:"12px",color:T.muted,margin:0}}>No projects yet.</p>
             :projects.slice(0,6).map((p,i)=>{
               const pRisks=(p.risks||[]).filter(r=>!r.dismissed).length;
               return(
-                <div key={p.id} onClick={()=>{setActiveIdx(i);setView("project");}} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"6px 0",borderBottom:`1px solid ${T.border}`,cursor:"pointer"}}>
-                  <div style={{display:"flex",alignItems:"center",gap:7,minWidth:0}}>
+                <div key={p.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"6px 0",borderBottom:`1px solid ${T.border}`}}>
+                  <div onClick={()=>{setActiveIdx(i);setView("project");}} style={{display:"flex",alignItems:"center",gap:7,minWidth:0,flex:1,cursor:"pointer"}}>
                     <div style={{width:3,height:14,background:pc(i),flexShrink:0}}/>
                     <span style={{fontSize:"13px",fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:T.ink}}>{p.name}</span>
                   </div>
-                  <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
                     {pRisks>0&&<span style={{fontSize:"10px",color:T.danger}}>⚠ {pRisks}</span>}
                     <span style={{fontSize:"11px",color:T.muted}}>{p.notes.length}</span>
+                    {/* RAG dot — click to override */}
+                    <div onClick={()=>setRagPickerProjectId(p.id)} title={p.rag ? `Health: ${RAG_LABELS[p.rag]} — click to change` : "No health score yet — click to set"} style={{cursor:"pointer",display:"flex",alignItems:"center",gap:3}}>
+                      {p.rag ? <RagDot rag={p.rag} size={10}/> : <span style={{width:10,height:10,borderRadius:"50%",border:`1.5px dashed ${T.muted}`,display:"inline-block"}} title="No health score"/>}
+                    </div>
                   </div>
                 </div>
               );
@@ -1043,9 +1489,17 @@ Bullet list of tasks not tied to any project. If none write "None."
                     {m.role&&<div style={{fontSize:"11px",color:T.muted}}>{m.role}</div>}
                   </div>
                 </div>
-                <div style={{display:"flex",gap:8,fontSize:"11px",color:T.muted}}>
-                  <span>{nc} notes</span>
-                  {openComm>0&&<span style={{color:T.warning}}>⚡ {openComm} open</span>}
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:"11px",color:T.muted}}>
+                  <div style={{display:"flex",gap:8}}>
+                    <span>{nc} notes</span>
+                    {openComm>0&&<span style={{color:T.warning}}>⚡ {openComm} open</span>}
+                  </div>
+                  {/* FEATURE 4: Share link button on team card */}
+                  <button onClick={e=>{e.stopPropagation();generateShareLink(m.id);}}
+                    title="Copy share link for this person's tasks"
+                    style={{background:"none",border:"none",cursor:"pointer",fontSize:"12px",color:T.accentMid,padding:0,fontFamily:T.sans}}>
+                    🔗 Share
+                  </button>
                 </div>
               </Card>
             );
@@ -1070,6 +1524,8 @@ Bullet list of tasks not tied to any project. If none write "None."
         </div>
         <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
           <Btn variant="secondary" size="sm" onClick={()=>generateMemberSummary(activeMember.id)} disabled={memberLoading}>{memberLoading?"Updating…":activeMember.summary?"↻ Refresh":"Generate"}</Btn>
+          {/* FEATURE 4: Share button in member view */}
+          <Btn variant="secondary" size="sm" onClick={()=>generateShareLink(activeMember.id)}>🔗 Share tasks</Btn>
           <Btn variant="danger" size="sm" onClick={()=>{deleteMember(activeMember.id);setView("team");}}>Remove</Btn>
         </div>
       </div>
@@ -1148,6 +1604,16 @@ Bullet list of tasks not tied to any project. If none write "None."
   if(view==="project"&&activeProject) return (
     <Shell>
       {toast&&<Toast message={toast} onDone={()=>setToast(null)}/>}
+      {/* FEATURE 1: RAG picker on project page */}
+      {ragPickerProjectId&&(
+        <RagPicker
+          current={projects.find(p=>p.id===ragPickerProjectId)?.rag}
+          onSelect={async(rag)=>{await db.updateProjectRag(ragPickerProjectId,rag,true);await reload();}}
+          onClose={()=>setRagPickerProjectId(null)}
+        />
+      )}
+      {/* FEATURE 2: Pre-meeting briefing modal */}
+      {showBriefing&&<PreMeetingBriefing project={activeProject} todos={todos} members={members} onClose={()=>setShowBriefing(false)}/>}
       <SearchEl/>
       {editingNote&&<EditNoteModal note={editingNote} projectName={activeProject.name} onSave={raw=>saveEditedNote(editingNote.id,raw)} onCancel={()=>setEditingNote(null)} saving={editSaving}/>}
       <BottomSearchBar onClick={()=>setShowSearch(true)}/>
@@ -1157,8 +1623,17 @@ Bullet list of tasks not tied to any project. If none write "None."
           <button onClick={()=>setView("home")} style={{fontSize:"12px",color:T.mid,background:"none",border:"none",cursor:"pointer",padding:0,fontFamily:T.sans,flexShrink:0}}>← Overview</button>
           <div style={{width:3,height:16,background:pc(activeIdx),flexShrink:0}}/>
           <h1 style={{margin:0,fontFamily:T.serif,fontSize:"19px",fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:T.ink}}>{activeProject.name}</h1>
+          {/* FEATURE 1: RAG dot on project header */}
+          {activeProject.rag&&(
+            <div onClick={()=>setRagPickerProjectId(activeProject.id)} style={{cursor:"pointer",display:"flex",alignItems:"center",gap:4}} title={`Health: ${RAG_LABELS[activeProject.rag]} — click to change`}>
+              <RagDot rag={activeProject.rag} size={11}/>
+              <span style={{fontSize:"11px",color:RAG_COLORS[activeProject.rag],fontWeight:600}}>{RAG_LABELS[activeProject.rag]}</span>
+            </div>
+          )}
         </div>
-        <div style={{display:"flex",gap:6}}>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          {/* FEATURE 2: Brief me button */}
+          <Btn size="sm" variant="secondary" onClick={()=>setShowBriefing(true)}>⚡ Brief me</Btn>
           <Btn size="sm" onClick={()=>{setNotePhase("input");setNotes("");setError("");setTaggedMembers([]);setTaggedSelf(false);setView("addNote");}}>+ Add Notes</Btn>
           <Btn variant="danger" size="sm" onClick={()=>deleteProject(activeIdx)}>Delete</Btn>
         </div>
@@ -1230,7 +1705,7 @@ Bullet list of tasks not tied to any project. If none write "None."
 
       {activeProjectTab==="decisions"&&(
         (activeProject.decisions||[]).length===0
-          ?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No decisions extracted yet. Decisions are auto-detected when you add meeting notes.</p></Card>
+          ?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No decisions extracted yet.</p></Card>
           :[...activeProject.decisions].reverse().map(d=>(
             <Card key={d.id} accent={T.accent}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:4,gap:6}}>
@@ -1244,7 +1719,7 @@ Bullet list of tasks not tied to any project. If none write "None."
 
       {activeProjectTab==="commitments"&&(
         (activeProject.commitments||[]).length===0
-          ?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No commitments extracted yet. Commitments are auto-detected when you add meeting notes.</p></Card>
+          ?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No commitments extracted yet.</p></Card>
           :[...activeProject.commitments].reverse().map(c=>{
             const member=members.find(m=>m.id===c.member_id);
             return(
@@ -1268,7 +1743,7 @@ Bullet list of tasks not tied to any project. If none write "None."
 
       {activeProjectTab==="risks"&&(
         (activeProject.risks||[]).filter(r=>!r.dismissed).length===0
-          ?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No active risks. Risks are auto-detected from meeting notes.</p></Card>
+          ?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No active risks.</p></Card>
           :(activeProject.risks||[]).filter(r=>!r.dismissed).map(r=>(
             <Card key={r.id} style={{borderLeft:`3px solid ${r.severity==="high"?T.danger:r.severity==="medium"?T.warning:T.accentMid}`}}>
               <div style={{display:"flex",alignItems:"flex-start",gap:10}}>
