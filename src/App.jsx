@@ -24,7 +24,7 @@ const loadData = () => { try { const r=localStorage.getItem(SK); return r?JSON.p
 const saveData = d => { try { localStorage.setItem(SK,JSON.stringify(d)); } catch {} };
 
 const claude = async (prompt, maxTokens=1500) => {
-  const r = await fetch("https://api.anthropic.com/v1/messages", {
+  const r = await fetch("/api/claude", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model:"claude-sonnet-4-20250514", max_tokens:maxTokens, messages:[{role:"user",content:prompt}] })
