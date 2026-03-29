@@ -111,7 +111,7 @@ const db = {
 // ─── UI primitives ────────────────────────────────────────────────────────────
 const MD = ({content,small}) => {
   const fs=small?"13px":"14px";
-  const css=`.md h1{font-size:17px;font-weight:700;margin:12px 0 5px;font-family:${T.serif};color:${T.ink}}.md h2{font-size:15px;font-weight:700;margin:10px 0 4px;font-family:${T.serif};color:${T.ink}}.md h3{font-size:${fs};font-weight:600;margin:8px 0 3px;color:${T.ink}}.md strong{font-weight:600}.md ul,.md ol{margin:4px 0;padding-left:18px}.md li{margin:2px 0;font-size:${fs}}.md ul li{list-style-type:disc}.md ol li{list-style-type:decimal}.md p{margin:4px 0;font-size:${fs};line-height:1.6}`;
+  const css=`.md h1{font-size:17px;font-weight:700;margin:12px 0 5px;font-family:${T.serif};color:${T.ink};text-align:left}.md h2{font-size:15px;font-weight:700;margin:10px 0 4px;font-family:${T.serif};color:${T.ink};text-align:left}.md h3{font-size:${fs};font-weight:600;margin:8px 0 3px;color:${T.ink};text-align:left}.md strong{font-weight:600}.md ul,.md ol{margin:4px 0;padding-left:18px;text-align:left}.md li{margin:2px 0;font-size:${fs};text-align:left}.md ul li{list-style-type:disc}.md ol li{list-style-type:decimal}.md p{margin:4px 0;font-size:${fs};line-height:1.6;text-align:left}`;
   const render=t=>{
     let h=t.replace(/\*\*(.*?)\*\*/g,"<strong>$1</strong>").replace(/^### (.+)$/gm,"<h3>$1</h3>").replace(/^## (.+)$/gm,"<h2>$1</h2>").replace(/^# (.+)$/gm,"<h1>$1</h1>");
     const lines=h.split("\n"),out=[],stk=[];
@@ -163,26 +163,10 @@ const GroupLabel = ({children,color=T.mid}) => (
 
 // ─── Onboarding Tour ──────────────────────────────────────────────────────────
 const TOUR_STEPS = [
-  {
-    target: "tour-briefing",
-    title: "Your command centre",
-    body: "Every week, Debrief reads all your meeting notes and tasks, then writes you a smart briefing — what got done, what's still open, and what to prioritise next week. One click, always current.",
-  },
-  {
-    target: "tour-tasks",
-    title: "Never miss an action item",
-    body: "Tag yourself with @YourName inside meeting notes. Debrief automatically extracts every action item assigned to you and adds it here — organised by overdue, this week, and upcoming.",
-  },
-  {
-    target: "tour-project",
-    title: "Organise by project",
-    body: "Create a project for each client, team, or initiative. Add meeting notes over time and Debrief maintains a live status summary — always showing where things stand without you having to write it.",
-  },
-  {
-    target: "tour-nav",
-    title: "Track your whole team",
-    body: "Go to Team to add colleagues. Tag them with @Name in notes and Debrief builds an activity summary for each person — what they own, what decisions they were part of, and what's open across all projects.",
-  },
+  {target:"tour-briefing",title:"Your command centre",body:"Every week, Debrief reads all your meeting notes and tasks, then writes you a smart briefing — what got done, what's still open, and what to prioritise next week. One click, always current."},
+  {target:"tour-tasks",title:"Never miss an action item",body:"Tag yourself with @YourName inside meeting notes. Debrief automatically extracts every action item assigned to you and adds it here — organised by overdue, this week, and upcoming."},
+  {target:"tour-project",title:"Organise by project",body:"Create a project for each client, team, or initiative. Add meeting notes over time and Debrief maintains a live status summary — always showing where things stand without you having to write it."},
+  {target:"tour-nav",title:"Track your whole team",body:"Go to Team to add colleagues. Tag them with @Name in notes and Debrief builds an activity summary for each person — what they own, what decisions they were part of, and what's open across all projects."},
 ];
 
 const Tour = ({onDone}) => {
@@ -240,7 +224,7 @@ const Tour = ({onDone}) => {
             <span style={{fontSize:"13px",fontWeight:700}}>{curr.title}</span>
             <button onClick={onDone} style={{background:"none",border:"none",color:"rgba(255,255,255,0.6)",fontSize:14,cursor:"pointer",padding:0,marginLeft:8}}>✕</button>
           </div>
-          <p style={{margin:"0 0 14px",fontSize:"12px",lineHeight:1.6,color:"rgba(255,255,255,0.85)"}}>{curr.body}</p>
+          <p style={{margin:"0 0 14px",fontSize:"13px",lineHeight:1.6,color:"rgba(255,255,255,0.85)",textAlign:"left"}}>{curr.body}</p>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
             <div style={{display:"flex",gap:4}}>
               {TOUR_STEPS.map((_,i)=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:i===step?"#fff":"rgba(255,255,255,0.35)"}}/>)}
@@ -570,7 +554,9 @@ Bullet list.
       </div>
       <div style={{display:"flex",alignItems:"center",gap:8}}>
         {data?.me&&<div style={{display:"flex",alignItems:"center",gap:5}}><Av name={data.me} size={22} isSelf/><span style={{fontSize:"12px",color:T.mid}}>{data.me}</span></div>}
-        <Btn size="sm" id="tour-project" onClick={()=>{setNewProjName("");setView("newProject");}}>+ Project</Btn>
+        <div id="tour-project" style={{display:"inline-block"}}>
+          <Btn size="sm" onClick={()=>{setNewProjName("");setView("newProject");}}>+ Project</Btn>
+        </div>
         <Btn size="sm" variant="secondary" onClick={signOut}>Sign out</Btn>
       </div>
     </div>
