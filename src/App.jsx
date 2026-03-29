@@ -19,7 +19,6 @@ const isThisWeek = iso => { const d=new Date(iso),now=new Date(),s=new Date(now)
 const isNextWeek = iso => { const d=new Date(iso),now=new Date(),s=new Date(now); s.setDate(now.getDate()-now.getDay()+8); const e=new Date(s); e.setDate(s.getDate()+6); return d>=s&&d<=e; };
 const isOverdue = iso => iso && new Date(iso)<new Date() && !isThisWeek(iso);
 
-// ─── Claude API ───────────────────────────────────────────────────────────────
 const claude = async (prompt, maxTokens=1500) => {
   const r = await fetch("/api/claude", {
     method:"POST", headers:{"Content-Type":"application/json"},
@@ -33,7 +32,6 @@ const parseJsonSafe = raw => {
   catch { const m=raw.match(/\[[\s\S]*\]/); if(m){try{return JSON.parse(m[0]);}catch{}} return null; }
 };
 
-// ─── Supabase DB layer ────────────────────────────────────────────────────────
 const db = {
   async getUser() {
     const { data: { user } } = await supabase.auth.getUser();
@@ -58,7 +56,13 @@ const db = {
       supabase.from('profiles').select('*').eq('id',userId).single(),
     ]);
     return {
-      projects: (projects||[]).map(p=>({...p,statusUpdated:p.status_updated_at,notes:(notes||[]).filter(n=>n.project_id===p.id).map(n=>({...n,selfTagged:n.self_tagged,taggedMembers:(noteMembers||[]).filter(nm=>nm.note_id===n.id).map(nm=>nm.member_id)}))})),
+      projects: (projects||[]).map(p=>({
+        ...p, statusUpdated:p.status_updated_at,
+        notes:(notes||[]).filter(n=>n.project_id===p.id).map(n=>({
+          ...n, selfTagged:n.self_tagged,
+          taggedMembers:(noteMembers||[]).filter(nm=>nm.note_id===n.id).map(nm=>nm.member_id)
+        }))
+      })),
       members: members||[],
       todos: (todos||[]).map(t=>({...t,dueDate:t.due_date,projectId:t.project_id,doneAt:t.done_at})),
       me: profile?.name||null,
@@ -76,9 +80,17 @@ const db = {
   },
   async deleteProject(projectId) { await supabase.from('projects').delete().eq('id',projectId); },
   async createNote(userId,projectId,{raw,summary,selfTagged,taggedMemberIds}) {
-    const {data:note}=await supabase.from('notes').insert({user_id:userId,project_id:projectId,raw,summary,self_tagged:selfTagged,date:new Date().toISOString()}).select().single();
-    if(taggedMemberIds?.length>0) await supabase.from('note_members').insert(taggedMemberIds.map(member_id=>({note_id:note.id,member_id})));
+    const {data:note}=await supabase.from('notes').insert({
+      user_id:userId,project_id:projectId,raw,summary,
+      self_tagged:selfTagged,date:new Date().toISOString()
+    }).select().single();
+    if(taggedMemberIds?.length>0) {
+      await supabase.from('note_members').insert(taggedMemberIds.map(member_id=>({note_id:note.id,member_id})));
+    }
     return {...note,selfTagged:note.self_tagged,taggedMembers:taggedMemberIds||[]};
+  },
+  async updateNote(noteId,{raw,summary}) {
+    await supabase.from('notes').update({raw,summary}).eq('id',noteId);
   },
   async deleteNote(noteId) { await supabase.from('notes').delete().eq('id',noteId); },
   async createMember(userId,{name,role}) {
@@ -90,7 +102,9 @@ const db = {
   },
   async deleteMember(memberId) { await supabase.from('members').delete().eq('id',memberId); },
   async createTodo(userId,{text,dueDate,projectId,source='manual'}) {
-    const {data}=await supabase.from('todos').insert({user_id:userId,text,due_date:dueDate||null,project_id:projectId||null,source}).select().single();
+    const {data}=await supabase.from('todos').insert({
+      user_id:userId,text,due_date:dueDate||null,project_id:projectId||null,source
+    }).select().single();
     return {...data,dueDate:data.due_date,projectId:data.project_id};
   },
   async toggleTodo(todoId,done) {
@@ -100,23 +114,24 @@ const db = {
   async upsertHomeSummary(userId,summary) {
     await supabase.from('home_summaries').upsert({user_id:userId,summary,updated_at:new Date().toISOString()});
   },
-  async setName(userId,name) {
-    await supabase.from('profiles').upsert({id:userId,name});
-  },
-  async completeTour(userId) {
-    await supabase.from('profiles').update({tour_done:true}).eq('id',userId);
-  },
+  async setName(userId,name) { await supabase.from('profiles').upsert({id:userId,name}); },
+  async completeTour(userId) { await supabase.from('profiles').update({tour_done:true}).eq('id',userId); },
 };
 
-// ─── UI primitives ────────────────────────────────────────────────────────────
+// ─── Primitives ───────────────────────────────────────────────────────────────
 const MD = ({content,small}) => {
   const fs=small?"13px":"14px";
   const css=`.md h1{font-size:17px;font-weight:700;margin:12px 0 5px;font-family:${T.serif};color:${T.ink};text-align:left}.md h2{font-size:15px;font-weight:700;margin:10px 0 4px;font-family:${T.serif};color:${T.ink};text-align:left}.md h3{font-size:${fs};font-weight:600;margin:8px 0 3px;color:${T.ink};text-align:left}.md strong{font-weight:600}.md ul,.md ol{margin:4px 0;padding-left:18px;text-align:left}.md li{margin:2px 0;font-size:${fs};text-align:left}.md ul li{list-style-type:disc}.md ol li{list-style-type:decimal}.md p{margin:4px 0;font-size:${fs};line-height:1.6;text-align:left}`;
   const render=t=>{
     let h=t.replace(/\*\*(.*?)\*\*/g,"<strong>$1</strong>").replace(/^### (.+)$/gm,"<h3>$1</h3>").replace(/^## (.+)$/gm,"<h2>$1</h2>").replace(/^# (.+)$/gm,"<h1>$1</h1>");
     const lines=h.split("\n"),out=[],stk=[];
-    for(const line of lines){const bm=line.match(/^(\s*)[-*+] (.+)$/),nm=line.match(/^(\s*)\d+\.\s(.+)$/);if(bm||nm){const m=bm||nm,lvl=Math.floor(m[1].length/2),lt=bm?"ul":"ol";while(stk.length>lvl+1)out.push(`</${stk.pop()}>`);if(stk.length===lvl){out.push(`<${lt}>`);stk.push(lt);}out.push(`<li>${m[2]}</li>`);}else{while(stk.length)out.push(`</${stk.pop()}>`);out.push(line.trim()===""?"<br/>":line.match(/^<[^>]+>$/)?line:`<p>${line}</p>`);}}
-    while(stk.length)out.push(`</${stk.pop()}>`);return out.join("");
+    for(const line of lines){
+      const bm=line.match(/^(\s*)[-*+] (.+)$/),nm=line.match(/^(\s*)\d+\.\s(.+)$/);
+      if(bm||nm){const m=bm||nm,lvl=Math.floor(m[1].length/2),lt=bm?"ul":"ol";while(stk.length>lvl+1)out.push(`</${stk.pop()}>`);if(stk.length===lvl){out.push(`<${lt}>`);stk.push(lt);}out.push(`<li>${m[2]}</li>`);}
+      else{while(stk.length)out.push(`</${stk.pop()}>`);out.push(line.trim()===""?"<br/>":line.match(/^<[^>]+>$/)?line:`<p>${line}</p>`);}
+    }
+    while(stk.length)out.push(`</${stk.pop()}>`);
+    return out.join("");
   };
   return <><style>{css}</style><div className="md" dangerouslySetInnerHTML={{__html:render(content)}}/></>;
 };
@@ -129,7 +144,12 @@ const Av = ({name,size=28,isSelf=false}) => (
 
 const Btn = ({children,onClick,disabled,variant="primary",size="md"}) => {
   const pad=size==="sm"?"5px 10px":"9px 16px",fs=size==="sm"?"12px":"13px";
-  const v={primary:{background:T.accent,color:"#fff",border:`1px solid ${T.accent}`},secondary:{background:"transparent",color:T.ink,border:`1px solid ${T.border}`},ghost:{background:"transparent",color:T.mid,border:"none"},danger:{background:"transparent",color:T.danger,border:`1px solid ${T.danger}`}};
+  const v={
+    primary:{background:T.accent,color:"#fff",border:`1px solid ${T.accent}`},
+    secondary:{background:"transparent",color:T.ink,border:`1px solid ${T.border}`},
+    ghost:{background:"transparent",color:T.mid,border:"none"},
+    danger:{background:"transparent",color:T.danger,border:`1px solid ${T.danger}`}
+  };
   return <button onClick={onClick} disabled={disabled} style={{...v[variant],padding:pad,fontSize:fs,fontWeight:500,cursor:disabled?"not-allowed":"pointer",borderRadius:2,fontFamily:T.sans,opacity:disabled?0.5:1,whiteSpace:"nowrap",flexShrink:0}}>{children}</button>;
 };
 
@@ -161,7 +181,90 @@ const GroupLabel = ({children,color=T.mid}) => (
   <p style={{margin:"14px 0 6px",fontSize:"10px",fontWeight:700,letterSpacing:"0.09em",textTransform:"uppercase",color}}>{children}</p>
 );
 
-// ─── Onboarding Tour ──────────────────────────────────────────────────────────
+// ─── Search Overlay ───────────────────────────────────────────────────────────
+const SearchOverlay = ({projects,onClose,onProjectNav}) => {
+  const [q,setQ]=useState("");
+  const inputRef=useRef(null);
+  useEffect(()=>{ setTimeout(()=>inputRef.current?.focus(),50); },[]);
+
+  const results=useMemo(()=>{
+    if(!q.trim()) return [];
+    const ql=q.toLowerCase();
+    const hits=[];
+    for(const p of projects){
+      for(const n of p.notes){
+        if(n.summary?.toLowerCase().includes(ql)||n.raw?.toLowerCase().includes(ql)||p.name.toLowerCase().includes(ql)){
+          hits.push({note:n,project:p,projIdx:projects.findIndex(pp=>pp.id===p.id)});
+        }
+      }
+    }
+    return hits.slice(0,20);
+  },[q,projects]);
+
+  const highlight=(text,q)=>{
+    if(!q.trim()) return text.slice(0,120);
+    const idx=text.toLowerCase().indexOf(q.toLowerCase());
+    if(idx===-1) return text.slice(0,120);
+    const start=Math.max(0,idx-40);
+    const excerpt=text.slice(start,start+160);
+    return (start>0?"…":"")+excerpt+(start+160<text.length?"…":"");
+  };
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1000,display:"flex",flexDirection:"column"}} onClick={onClose}>
+      <div style={{background:T.white,margin:"20px 16px 0",borderRadius:4,padding:"12px 16px",display:"flex",gap:10,alignItems:"center"}} onClick={e=>e.stopPropagation()}>
+        <span style={{fontSize:18,color:T.mid}}>🔍</span>
+        <input ref={inputRef} value={q} onChange={e=>setQ(e.target.value)} placeholder="Search notes, summaries, projects…"
+          style={{flex:1,border:"none",outline:"none",fontSize:"15px",color:T.ink,fontFamily:T.sans,background:"transparent"}}/>
+        <button onClick={onClose} style={{background:"none",border:"none",color:T.muted,fontSize:18,cursor:"pointer",padding:0}}>✕</button>
+      </div>
+      <div style={{flex:1,overflowY:"auto",margin:"8px 16px 16px"}} onClick={e=>e.stopPropagation()}>
+        {q.trim()&&results.length===0&&(
+          <div style={{background:T.white,borderRadius:4,padding:"24px",textAlign:"center",color:T.muted,fontSize:"14px"}}>No results for "{q}"</div>
+        )}
+        {results.map((r,i)=>(
+          <div key={i} onClick={()=>{onProjectNav(r.projIdx);onClose();}}
+            style={{background:T.white,borderRadius:4,padding:"14px 16px",marginBottom:6,cursor:"pointer",borderLeft:`3px solid ${pc(r.projIdx)}`}}>
+            <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:4,flexWrap:"wrap"}}>
+              <Tag color={pc(r.projIdx)}>{r.project.name}</Tag>
+              <span style={{fontSize:"11px",color:T.muted}}>{fmt(r.note.date)}</span>
+            </div>
+            <p style={{margin:0,fontSize:"13px",color:T.mid,lineHeight:1.5,textAlign:"left"}}>
+              {highlight(r.note.summary?.replace(/[#*]/g,"")||r.note.raw||"",q)}
+            </p>
+          </div>
+        ))}
+        {!q.trim()&&(
+          <div style={{background:T.white,borderRadius:4,padding:"24px",textAlign:"center",color:T.muted,fontSize:"13px"}}>
+            Start typing to search across all your notes and projects
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ─── Edit Note Modal ──────────────────────────────────────────────────────────
+const EditNoteModal = ({note,projectName,onSave,onCancel,saving}) => {
+  const ref=useRef(null);
+  useEffect(()=>{ if(ref.current) ref.current.value=note.raw; },[]);
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+      <div style={{background:T.white,borderRadius:4,padding:"24px",width:"100%",maxWidth:600,maxHeight:"90vh",overflowY:"auto",fontFamily:T.sans}}>
+        <h2 style={{margin:"0 0 4px",fontSize:"18px",fontWeight:700,fontFamily:T.serif,color:T.ink}}>Edit Meeting Notes</h2>
+        <p style={{margin:"0 0 14px",fontSize:"12px",color:T.muted}}>Saving to: {projectName} · Summary will be regenerated</p>
+        <textarea ref={ref} style={{...inp,height:220,resize:"vertical",lineHeight:1.65}}/>
+        {saving&&<p style={{fontSize:"12px",color:T.accentMid,margin:"8px 0 0"}}>Regenerating summary and project status…</p>}
+        <div style={{display:"flex",gap:8,marginTop:14}}>
+          <Btn onClick={()=>onSave(ref.current?.value||"")} disabled={saving}>{saving?"Saving…":"Save & Regenerate"}</Btn>
+          <Btn variant="secondary" onClick={onCancel} disabled={saving}>Cancel</Btn>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ─── Tour ─────────────────────────────────────────────────────────────────────
 const TOUR_STEPS = [
   {target:"tour-briefing",title:"Your command centre",body:"Every week, Debrief reads all your meeting notes and tasks, then writes you a smart briefing — what got done, what's still open, and what to prioritise next week. One click, always current."},
   {target:"tour-tasks",title:"Never miss an action item",body:"Tag yourself with @YourName inside meeting notes. Debrief automatically extracts every action item assigned to you and adds it here — organised by overdue, this week, and upcoming."},
@@ -179,7 +282,7 @@ const Tour = ({onDone}) => {
       const el=document.getElementById(TOUR_STEPS[step].target);
       if(!el) return;
       const r=el.getBoundingClientRect();
-      setPos({top:r.bottom+window.scrollY+10,left:r.left+window.scrollX,width:r.width});
+      setPos({top:r.bottom+window.scrollY+10,left:r.left+window.scrollX});
     };
     position();
     window.addEventListener('resize',position);
@@ -198,8 +301,8 @@ const Tour = ({onDone}) => {
           <span style={{fontSize:"11px",fontWeight:700,letterSpacing:"0.07em",color:T.muted,textTransform:"uppercase"}}>Step {step+1} of {TOUR_STEPS.length}</span>
           <button onClick={onDone} style={{background:"none",border:"none",color:T.muted,fontSize:18,cursor:"pointer",padding:0}}>✕</button>
         </div>
-        <h3 style={{margin:"0 0 8px",fontSize:"18px",fontWeight:700,fontFamily:T.serif,color:T.ink}}>{curr.title}</h3>
-        <p style={{margin:"0 0 20px",fontSize:"14px",color:T.mid,lineHeight:1.6}}>{curr.body}</p>
+        <h3 style={{margin:"0 0 8px",fontSize:"18px",fontWeight:700,fontFamily:T.serif,color:T.ink,textAlign:"left"}}>{curr.title}</h3>
+        <p style={{margin:"0 0 20px",fontSize:"14px",color:T.mid,lineHeight:1.6,textAlign:"left"}}>{curr.body}</p>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
           <div style={{display:"flex",gap:5}}>
             {TOUR_STEPS.map((_,i)=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:i===step?T.accent:T.border}}/>)}
@@ -221,8 +324,8 @@ const Tour = ({onDone}) => {
       {pos&&(
         <div style={{position:"absolute",top:pos.top,left:Math.min(pos.left,window.innerWidth-280),width:260,background:T.accent,color:"#fff",borderRadius:8,padding:"14px 16px",zIndex:1000,fontFamily:T.sans,boxSizing:"border-box"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
-            <span style={{fontSize:"13px",fontWeight:700}}>{curr.title}</span>
-            <button onClick={onDone} style={{background:"none",border:"none",color:"rgba(255,255,255,0.6)",fontSize:14,cursor:"pointer",padding:0,marginLeft:8}}>✕</button>
+            <span style={{fontSize:"13px",fontWeight:700,textAlign:"left"}}>{curr.title}</span>
+            <button onClick={onDone} style={{background:"none",border:"none",color:"rgba(255,255,255,0.6)",fontSize:14,cursor:"pointer",padding:0,marginLeft:8,flexShrink:0}}>✕</button>
           </div>
           <p style={{margin:"0 0 14px",fontSize:"13px",lineHeight:1.6,color:"rgba(255,255,255,0.85)",textAlign:"left"}}>{curr.body}</p>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
@@ -243,101 +346,7 @@ const Tour = ({onDone}) => {
   );
 };
 
-// ─── Search Overlay ───────────────────────────────────────────────────────────
-const SearchOverlay = ({projects, members, onClose, onProjectNav}) => {
-  const [q, setQ] = useState("");
-  const inputRef = useRef(null);
-
-  useEffect(()=>{ setTimeout(()=>inputRef.current?.focus(), 50); }, []);
-
-  const results = useMemo(()=>{
-    if(!q.trim()) return [];
-    const ql = q.toLowerCase();
-    const hits = [];
-    for(const p of projects) {
-      for(const n of p.notes) {
-        const inSummary = n.summary?.toLowerCase().includes(ql);
-        const inRaw = n.raw?.toLowerCase().includes(ql);
-        const inProject = p.name.toLowerCase().includes(ql);
-        if(inSummary||inRaw||inProject) {
-          hits.push({note:n, project:p, projIdx:projects.findIndex(pp=>pp.id===p.id)});
-        }
-      }
-      if(p.name.toLowerCase().includes(ql) && p.notes.length===0) {
-        hits.push({project:p, projIdx:projects.findIndex(pp=>pp.id===p.id), noteOnly:true});
-      }
-    }
-    return hits.slice(0,20);
-  }, [q, projects]);
-
-  const highlight = (text, q) => {
-    if(!q.trim()) return text;
-    const idx = text.toLowerCase().indexOf(q.toLowerCase());
-    if(idx===-1) return text.slice(0,120);
-    const start = Math.max(0, idx-40);
-    const excerpt = text.slice(start, start+160);
-    return (start>0?"…":"")+excerpt+(excerpt.length<text.length?"…":"");
-  };
-
-  return (
-    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1000,display:"flex",flexDirection:"column"}} onClick={onClose}>
-      <div style={{background:T.white,margin:"20px 16px 0",borderRadius:4,padding:"12px 16px",display:"flex",gap:10,alignItems:"center"}} onClick={e=>e.stopPropagation()}>
-        <span style={{fontSize:18,color:T.mid}}>🔍</span>
-        <input ref={inputRef} value={q} onChange={e=>setQ(e.target.value)}
-          placeholder="Search notes, summaries, projects…"
-          style={{flex:1,border:"none",outline:"none",fontSize:"15px",color:T.ink,fontFamily:T.sans,background:"transparent"}}/>
-        <button onClick={onClose} style={{background:"none",border:"none",color:T.muted,fontSize:18,cursor:"pointer",padding:0}}>✕</button>
-      </div>
-      <div style={{flex:1,overflowY:"auto",margin:"8px 16px 16px"}} onClick={e=>e.stopPropagation()}>
-        {q.trim()&&results.length===0&&(
-          <div style={{background:T.white,borderRadius:4,padding:"24px",textAlign:"center",color:T.muted,fontSize:"14px"}}>
-            No results for "{q}"
-          </div>
-        )}
-        {results.map((r,i)=>(
-          <div key={i} onClick={()=>{onProjectNav(r.projIdx);onClose();}}
-            style={{background:T.white,borderRadius:4,padding:"14px 16px",marginBottom:6,cursor:"pointer",borderLeft:`3px solid ${pc(r.projIdx)}`}}>
-            <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:4,flexWrap:"wrap"}}>
-              <Tag color={pc(r.projIdx)}>{r.project.name}</Tag>
-              {r.note&&<span style={{fontSize:"11px",color:T.muted}}>{fmt(r.note.date)}</span>}
-            </div>
-            {r.note&&<p style={{margin:0,fontSize:"13px",color:T.mid,lineHeight:1.5}}>
-              {highlight(r.note.summary?.replace(/[#*]/g,"")||r.note.raw||"", q)}
-            </p>}
-            {r.noteOnly&&<p style={{margin:0,fontSize:"13px",color:T.muted}}>Project — {r.project.notes.length} notes</p>}
-          </div>
-        ))}
-        {!q.trim()&&(
-          <div style={{background:T.white,borderRadius:4,padding:"24px",textAlign:"center",color:T.muted,fontSize:"13px"}}>
-            Start typing to search across all your notes and projects
-          </div>
-        )}
-      </div>
-    </div>
-  );
-};
-
-// ─── Note Edit Modal ──────────────────────────────────────────────────────────
-const EditNoteModal = ({note, projectName, meName, members, onSave, onCancel, saving}) => {
-  const ref = useRef(null);
-  useEffect(()=>{ if(ref.current) ref.current.value = note.raw; }, []);
-  return (
-    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
-      <div style={{background:T.white,borderRadius:4,padding:"24px",width:"100%",maxWidth:600,maxHeight:"90vh",overflowY:"auto",fontFamily:T.sans}}>
-        <div style={{marginBottom:14}}>
-          <h2 style={{margin:0,fontSize:"18px",fontWeight:700,fontFamily:T.serif,color:T.ink}}>Edit Meeting Notes</h2>
-          <p style={{margin:"2px 0 0",fontSize:"12px",color:T.muted}}>Saving to: {projectName} · Summary will be regenerated</p>
-        </div>
-        <textarea ref={ref} style={{...{width:"100%",padding:"9px 11px",border:`1px solid ${T.border}`,borderRadius:2,fontSize:"14px",color:T.ink,boxSizing:"border-box",fontFamily:T.sans,background:T.white,outline:"none"},height:220,resize:"vertical",lineHeight:1.65}}/>
-        {saving&&<p style={{fontSize:"12px",color:T.accentMid,margin:"8px 0 0"}}>Regenerating summary and project status…</p>}
-        <div style={{display:"flex",gap:8,marginTop:14}}>
-          <Btn onClick={()=>onSave(ref.current?.value||"")} disabled={saving}>{saving?"Saving…":"Save & Regenerate"}</Btn>
-          <Btn variant="secondary" onClick={onCancel} disabled={saving}>Cancel</Btn>
-        </div>
-      </div>
-    </div>
-  );
-};
+// ─── Note Textarea ────────────────────────────────────────────────────────────
 const NoteTextarea = ({onSubmit,onCancel,loading,error,projectName,meName,members}) => {
   const ref=useRef(null);
   const [show,setShow]=useState(false);
@@ -349,14 +358,17 @@ const NoteTextarea = ({onSubmit,onCancel,loading,error,projectName,meName,member
   const handleChange=e=>{
     const val=e.target.value,cur=e.target.selectionStart,before=val.slice(0,cur);
     const match=before.match(/@([\w][\w ]*)$/);
-    if(match){setQ(match[1]);setShow(true);setDropPos(cur-match[0].length);}else setShow(false);
+    if(match){setQ(match[1]);setShow(true);setDropPos(cur-match[0].length);}
+    else setShow(false);
   };
+
   const insert=name=>{
     const ta=ref.current,val=ta.value;
     const before=val.slice(0,dropPos),rest=val.slice(dropPos).replace(/^@[\w ]*/,"");
     ta.value=before+`@${name}`+(rest.startsWith(" ")?rest:" "+rest);
     setShow(false);ta.focus();
   };
+
   const loadExample=key=>{
     ref.current.value=key==="meetingNotes"
       ?`Product Planning - Jan 15\nAttendees: Sarah (PM), Mike (Eng), Alex\n- Prioritize mobile app\n- Analytics dashboard to Q2\nActions: @${meName} review dashboard spec by Jan 20`
@@ -382,7 +394,8 @@ const NoteTextarea = ({onSubmit,onCancel,loading,error,projectName,meName,member
         {show&&filtered.length>0&&(
           <div style={{position:"absolute",top:"100%",left:0,right:0,background:T.white,border:`1px solid ${T.border}`,borderRadius:2,boxShadow:"0 4px 12px rgba(0,0,0,0.08)",zIndex:20}}>
             {filtered.map(m=>(
-              <div key={m.id} onMouseDown={e=>{e.preventDefault();insert(m.name);}} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",cursor:"pointer",fontSize:"13px",color:T.ink,borderBottom:`1px solid ${T.border}`}}>
+              <div key={m.id} onMouseDown={e=>{e.preventDefault();insert(m.name);}}
+                style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",cursor:"pointer",fontSize:"13px",color:T.ink,borderBottom:`1px solid ${T.border}`}}>
                 <Av name={m.name} size={20} isSelf={m.isSelf}/>{m.name}{m.isSelf&&" (you)"}
               </div>
             ))}
@@ -424,6 +437,9 @@ export default function App() {
   const [userId,setUserId]=useState(null);
   const [data,setData]=useState(null);
   const [showTour,setShowTour]=useState(false);
+  const [showSearch,setShowSearch]=useState(false);
+  const [editingNote,setEditingNote]=useState(null);
+  const [editSaving,setEditSaving]=useState(false);
   const [view,setView]=useState("home");
   const [activeIdx,setActiveIdx]=useState(null);
   const [activeMemberId,setActiveMemberId]=useState(null);
@@ -446,15 +462,8 @@ export default function App() {
   const [newTodoDue,setNewTodoDue]=useState("");
   const [todoFilter,setTodoFilter]=useState("pending");
 
-  const [showSearch, setShowSearch] = useState(false);
-  const [editingNote, setEditingNote] = useState(null);
-  const [editSaving, setEditSaving] = useState(false);
-
   useEffect(()=>{
-    const handler = e => { if(e.key==="k"&&(e.metaKey||e.ctrlKey)){e.preventDefault();setShowSearch(s=>!s);} };
-    window.addEventListener("keydown", handler);
-    return ()=>window.removeEventListener("keydown", handler);
-  }, []);
+    db.getUser().then(user=>{
       if(user){
         setUserId(user.id);
         db.loadAll(user.id).then(d=>{
@@ -464,6 +473,12 @@ export default function App() {
         });
       }
     });
+  },[]);
+
+  useEffect(()=>{
+    const handler=e=>{if(e.key==="k"&&(e.metaKey||e.ctrlKey)){e.preventDefault();setShowSearch(s=>!s);}};
+    window.addEventListener("keydown",handler);
+    return ()=>window.removeEventListener("keydown",handler);
   },[]);
 
   const projects=data?.projects||[];
@@ -497,7 +512,7 @@ export default function App() {
       const d=data;
       const myTodos=(d.todos||[]).filter(t=>t.done||isThisWeek(t.dueDate)||isThisWeek(t.createdAt));
       const recentNotes=[];
-      for(const p of d.projects)for(const n of p.notes)if(isThisWeek(n.date)||meInNotes(n.raw))recentNotes.push({project:p.name,date:n.date,summary:n.summary});
+      for(const p of d.projects) for(const n of p.notes) if(isThisWeek(n.date)||meInNotes(n.raw)) recentNotes.push({project:p.name,date:n.date,summary:n.summary});
       const nextTodos=(d.todos||[]).filter(t=>!t.done&&(isNextWeek(t.dueDate)||!t.dueDate)).slice(0,8);
       const summary=await claude(`Generate a weekly executive briefing for ${d.me||"the user"}.
 This week's meetings:\n${recentNotes.length>0?recentNotes.map(n=>`[${n.project}] ${fmt(n.date)}: ${n.summary.slice(0,250)}`).join("\n"):"None."}
@@ -512,7 +527,8 @@ Bullet list.
 3-5 actions.`,700);
       await db.upsertHomeSummary(userId,summary);
       await reload();
-    }catch{}finally{setHomeLoading(false);}
+    }catch{}
+    finally{setHomeLoading(false);}
   };
 
   const addTodo=async()=>{
@@ -542,7 +558,11 @@ Bullet list.
     if(nowDone&&todo.projectId){
       const pIdx=projects.findIndex(p=>p.id===todo.projectId);
       if(pIdx>=0&&projects[pIdx].notes.length>0){
-        try{const s=await claude(`Latest status for "${projects[pIdx].name}". Note: "${todo.text}" just completed.\n${projects[pIdx].notes.map((n,i)=>`Meeting ${i+1}:\n${n.summary}`).join("\n\n")}`,700);await db.updateProjectStatus(todo.projectId,s);await reload();}catch{}
+        try{
+          const s=await claude(`Latest status for "${projects[pIdx].name}". Note: "${todo.text}" just completed.\n${projects[pIdx].notes.map((n,i)=>`Meeting ${i+1}:\n${n.summary}`).join("\n\n")}`,700);
+          await db.updateProjectStatus(todo.projectId,s);
+          await reload();
+        }catch{}
       }
     }
   };
@@ -563,11 +583,12 @@ Bullet list.
     try{
       const member=members.find(m=>m.id===memberId);if(!member)return;
       const mentions=[];
-      for(const p of projects)for(const n of p.notes)if(n.raw.toLowerCase().includes(member.name.toLowerCase())||n.taggedMembers?.includes(member.id))mentions.push({project:p.name,date:n.date,summary:n.summary});
+      for(const p of projects) for(const n of p.notes) if(n.raw.toLowerCase().includes(member.name.toLowerCase())||n.taggedMembers?.includes(member.id)) mentions.push({project:p.name,date:n.date,summary:n.summary});
       const summary=mentions.length===0?"No notes mention this person yet.":await claude(`Summarise ${member.name}'s activity.\n\n${mentions.map(m=>`[${m.project}] ${fmt(m.date)}:\n${m.summary}`).join("\n\n---\n\n")}`,900);
       await db.updateMemberSummary(memberId,summary);
       await reload();
-    }catch{}finally{setMemberLoading(false);}
+    }catch{}
+    finally{setMemberLoading(false);}
   };
 
   const createProject=async()=>{
@@ -611,14 +632,14 @@ Bullet list.
       const d=await reload();
       const proj=d.projects.find(p=>p.id===activeProject.id);
       if(proj){
-        const allS=proj.notes.map((n,i)=>`Meeting ${i+1} (${fmt(n.date)}):\n${n.summary}`).join("\n\n");
+        const allS=proj.notes.map((nn,i)=>`Meeting ${i+1} (${fmt(nn.date)}):\n${nn.summary}`).join("\n\n");
         const status=await claude(`Latest status for "${proj.name}". Current state, open actions, decisions, blockers, next steps.\n${allS}`,700);
         await db.updateProjectStatus(proj.id,status);
       }
       if(selfMentioned)await extractTodosFromNote(summary,activeProject.id);
       for(const m of mentioned){
         const allM=[];
-        for(const p of(d.projects||[])){for(const note of p.notes){if(note.raw.toLowerCase().includes(m.name.toLowerCase())||note.taggedMembers?.includes(m.id))allM.push({project:p.name,date:note.date,summary:note.summary});}}
+        for(const p of(d.projects||[])) for(const note of p.notes) if(note.raw.toLowerCase().includes(m.name.toLowerCase())||note.taggedMembers?.includes(m.id)) allM.push({project:p.name,date:note.date,summary:note.summary});
         if(allM.length>0){try{const ms=await claude(`Summarise ${m.name}'s activity.\n\n${allM.map(a=>`[${a.project}] ${fmt(a.date)}:\n${a.summary}`).join("\n\n---\n\n")}`,700);await db.updateMemberSummary(m.id,ms);}catch{}}
       }
       await reload();
@@ -631,40 +652,44 @@ Bullet list.
   const deleteNote=async noteId=>{
     await db.deleteNote(noteId);
     const d=await reload();
-    const proj=d.projects.find(p=>p.id===activeProject.id);
-    if(proj&&proj.notes.length>0){try{const status=await claude(`Latest status for "${proj.name}":\n${proj.notes.map((n,i)=>`Meeting ${i+1}:\n${n.summary}`).join("\n\n")}`,700);await db.updateProjectStatus(proj.id,status);await reload();}catch{}}
+    const proj=d.projects.find(p=>p.id===activeProject?.id);
+    if(proj&&proj.notes.length>0){
+      try{
+        const status=await claude(`Latest status for "${proj.name}":\n${proj.notes.map((n,i)=>`Meeting ${i+1}:\n${n.summary}`).join("\n\n")}`,700);
+        await db.updateProjectStatus(proj.id,status);
+        await reload();
+      }catch{}
+    }
   };
 
-  const saveEditedNote = async (noteId, newRaw) => {
-    if(!newRaw.trim()) return;
+  const saveEditedNote=async(noteId,newRaw)=>{
+    if(!newRaw.trim())return;
     setEditSaving(true);
-    try {
-      const summary = await claude(`Convert to structured summary:\n1. Overview\n2. Key decisions\n3. Action items\n4. Discussion\n5. Next steps\nUse markdown.\n\nNotes:\n${newRaw}`, 1200);
-      await supabase.from('notes').update({ raw: newRaw, summary }).eq('id', noteId);
-      const d = await reload();
-      const proj = d.projects.find(p => p.id === activeProject.id);
-      if(proj) {
-        const allS = proj.notes.map((n,i)=>`Meeting ${i+1} (${fmt(n.date)}):\n${n.summary}`).join("\n\n");
-        const status = await claude(`Latest status for "${proj.name}". Current state, open actions, decisions, blockers, next steps.\n${allS}`, 700);
-        await db.updateProjectStatus(proj.id, status);
+    try{
+      const summary=await claude(`Convert to structured summary:\n1. Overview\n2. Key decisions\n3. Action items\n4. Discussion\n5. Next steps\nUse markdown.\n\nNotes:\n${newRaw}`,1200);
+      await db.updateNote(noteId,{raw:newRaw,summary});
+      const d=await reload();
+      const proj=d.projects.find(p=>p.id===activeProject?.id);
+      if(proj){
+        const allS=proj.notes.map((n,i)=>`Meeting ${i+1} (${fmt(n.date)}):\n${n.summary}`).join("\n\n");
+        const status=await claude(`Latest status for "${proj.name}". Current state, open actions, decisions, blockers, next steps.\n${allS}`,700);
+        await db.updateProjectStatus(proj.id,status);
         await reload();
       }
       setEditingNote(null);
-    } catch(e) { console.error(e); }
-    finally { setEditSaving(false); }
+    }catch(e){console.error(e);}
+    finally{setEditSaving(false);}
   };
 
-  const shareNote = async (note, projectName) => {
-    const text = `📋 *${projectName}* — ${fmt(note.date)}\n\n${note.summary.replace(/[#*]/g,"").trim()}`;
-    if(navigator.share) {
-      try { await navigator.share({ title: `Debrief — ${projectName}`, text }); } catch {}
-    } else {
+  const shareNote=async(note,projectName)=>{
+    const text=`${projectName} — ${fmt(note.date)}\n\n${note.summary.replace(/[#*]/g,"").trim()}`;
+    if(navigator.share){
+      try{await navigator.share({title:`Debrief — ${projectName}`,text});}catch{}
+    }else{
       await navigator.clipboard.writeText(text);
       alert("Summary copied to clipboard!");
     }
   };
-
-  const deleteProject=async idx=>{await db.deleteProject(projects[idx].id);await reload();setView("home");setActiveIdx(null);};
 
   const pendingTodos=todos.filter(t=>!t.done);
   const doneTodos=todos.filter(t=>t.done);
@@ -672,6 +697,13 @@ Bullet list.
   const thisWeekTodos=pendingTodos.filter(t=>isThisWeek(t.dueDate)||(!t.dueDate&&isThisWeek(t.createdAt)));
   const upcomingTodos=pendingTodos.filter(t=>!isThisWeek(t.dueDate)&&!isOverdue(t.dueDate)&&t.dueDate);
   const undatedTodos=pendingTodos.filter(t=>!t.dueDate&&!isThisWeek(t.createdAt));
+
+  const FloatingSearch=()=>(
+    <button onClick={()=>setShowSearch(true)}
+      style={{position:"fixed",bottom:24,right:24,width:48,height:48,borderRadius:"50%",background:T.accent,color:"#fff",border:"none",fontSize:20,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",boxShadow:"0 4px 12px rgba(0,51,102,0.3)",zIndex:900}}>
+      🔍
+    </button>
+  );
 
   const Nav=()=>(
     <div style={{marginBottom:24,paddingBottom:14,borderBottom:`1px solid ${T.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
@@ -699,18 +731,13 @@ Bullet list.
     </div>
   );
 
-  // Floating search button — rendered in every view
-  const FloatingSearch = () => (
-    <button onClick={()=>setShowSearch(true)}
-      style={{position:"fixed",bottom:24,right:24,width:48,height:48,borderRadius:"50%",
-        background:T.accent,color:"#fff",border:"none",fontSize:20,cursor:"pointer",
-        display:"flex",alignItems:"center",justifyContent:"center",
-        boxShadow:"0 4px 12px rgba(0,51,102,0.3)",zIndex:900}}>
-      🔍
-    </button>
+  if(!data) return (
+    <Shell>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"60vh"}}>
+        <p style={{color:T.muted}}>Loading your workspace…</p>
+      </div>
+    </Shell>
   );
-
-  if(!data) return <Shell><div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"60vh"}}><p style={{color:T.muted}}>Loading your workspace…</p></div></Shell>;
 
   if(!data.me) return (
     <Shell maxW={400}>
@@ -728,7 +755,7 @@ Bullet list.
 
   if(view==="home") return (
     <Shell>
-      {showSearch&&<SearchOverlay projects={projects} members={members} onClose={()=>setShowSearch(false)} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>}
+      {showSearch&&<SearchOverlay projects={projects} onClose={()=>setShowSearch(false)} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>}
       {showTour&&<Tour onDone={handleTourDone}/>}
       <FloatingSearch/>
       <Nav/>
@@ -769,7 +796,7 @@ Bullet list.
 
   if(view==="todos") return (
     <Shell>
-      {showSearch&&<SearchOverlay projects={projects} members={members} onClose={()=>setShowSearch(false)} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>}
+      {showSearch&&<SearchOverlay projects={projects} onClose={()=>setShowSearch(false)} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>}
       <FloatingSearch/>
       <Nav/>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:8}}>
@@ -796,13 +823,16 @@ Bullet list.
         {undatedTodos.length>0&&<><GroupLabel>No Date</GroupLabel><Card>{undatedTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} onToggle={toggleTodo} onDelete={deleteTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>)}</Card></>}
         {pendingTodos.length===0&&<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>All caught up.</p></Card>}
       </>)}
-      {todoFilter==="done"&&(doneTodos.length===0?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No completed tasks yet.</p></Card>:<Card>{[...doneTodos].reverse().map(t=><TodoItem key={t.id} todo={t} projects={projects} onToggle={toggleTodo} onDelete={deleteTodo}/>)}</Card>)}
+      {todoFilter==="done"&&(doneTodos.length===0
+        ?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No completed tasks yet.</p></Card>
+        :<Card>{[...doneTodos].reverse().map(t=><TodoItem key={t.id} todo={t} projects={projects} onToggle={toggleTodo} onDelete={deleteTodo}/>)}</Card>
+      )}
     </Shell>
   );
 
   if(view==="team") return (
     <Shell>
-      {showSearch&&<SearchOverlay projects={projects} members={members} onClose={()=>setShowSearch(false)} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>}
+      {showSearch&&<SearchOverlay projects={projects} onClose={()=>setShowSearch(false)} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>}
       <FloatingSearch/>
       <Nav/>
       <SectionTitle sub="Tag members in notes using @name.">Team</SectionTitle>
@@ -814,14 +844,19 @@ Bullet list.
           <Btn onClick={addMember} disabled={!newMemberName.trim()}>Add</Btn>
         </div>
       </Card>
-      {members.length===0?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No team members yet.</p></Card>
+      {members.length===0
+        ?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No team members yet.</p></Card>
         :<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:8}}>
           {members.map(m=>{
             const nc=projects.reduce((a,p)=>a+p.notes.filter(n=>n.taggedMembers?.includes(m.id)||n.raw.toLowerCase().includes(m.name.toLowerCase())).length,0);
             return(
               <Card key={m.id} accent={avatarBg(m.name)} style={{cursor:"pointer",marginBottom:0}}>
                 <div onClick={()=>{setActiveMemberId(m.id);setView("memberView");}} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
-                  <Av name={m.name} size={30}/><div style={{minWidth:0}}><div style={{fontWeight:600,fontSize:"13px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{m.name}</div>{m.role&&<div style={{fontSize:"11px",color:T.muted}}>{m.role}</div>}</div>
+                  <Av name={m.name} size={30}/>
+                  <div style={{minWidth:0}}>
+                    <div style={{fontWeight:600,fontSize:"13px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{m.name}</div>
+                    {m.role&&<div style={{fontSize:"11px",color:T.muted}}>{m.role}</div>}
+                  </div>
                 </div>
                 <div style={{fontSize:"11px",color:T.muted}}>{nc} note{nc!==1?"s":""}</div>
               </Card>
@@ -833,6 +868,8 @@ Bullet list.
 
   if(view==="memberView"&&activeMember) return (
     <Shell>
+      {showSearch&&<SearchOverlay projects={projects} onClose={()=>setShowSearch(false)} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>}
+      <FloatingSearch/>
       <Nav/>
       <button onClick={()=>setView("team")} style={{fontSize:"12px",color:T.mid,background:"none",border:"none",cursor:"pointer",padding:"0 0 16px",fontFamily:T.sans}}>← Team</button>
       <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:20,flexWrap:"wrap"}}>
@@ -857,12 +894,15 @@ Bullet list.
       </Card>
       {(()=>{
         const mentions=[];
-        for(const p of projects)for(const n of p.notes)if(n.taggedMembers?.includes(activeMember.id)||n.raw.toLowerCase().includes(activeMember.name.toLowerCase()))mentions.push({...n,projectName:p.name,projIdx:projects.findIndex(pp=>pp.name===p.name)});
-        if(!mentions.length)return<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No notes mention this person yet.</p></Card>;
+        for(const p of projects) for(const n of p.notes) if(n.taggedMembers?.includes(activeMember.id)||n.raw.toLowerCase().includes(activeMember.name.toLowerCase())) mentions.push({...n,projectName:p.name,projIdx:projects.findIndex(pp=>pp.name===p.name)});
+        if(!mentions.length) return <Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No notes mention this person yet.</p></Card>;
         return(<>{[...mentions].reverse().map(n=>(
           <Card key={n.id}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5,flexWrap:"wrap",gap:6}}>
-              <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}><Tag color={pc(n.projIdx)}>{n.projectName}</Tag><span style={{fontSize:"11px",color:T.muted}}>{fmt(n.date)}</span></div>
+              <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+                <Tag color={pc(n.projIdx)}>{n.projectName}</Tag>
+                <span style={{fontSize:"11px",color:T.muted}}>{fmt(n.date)}</span>
+              </div>
               <Btn variant="ghost" size="sm" onClick={()=>setExpandedNote(expandedNote===n.id?null:n.id)}>{expandedNote===n.id?"Hide":"View"}</Btn>
             </div>
             {expandedNote===n.id?<MD content={n.summary} small/>:<p style={{fontSize:"12px",color:T.muted,margin:0,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{n.summary.replace(/[#*]/g,"").slice(0,100)}…</p>}
@@ -889,8 +929,8 @@ Bullet list.
 
   if(view==="project"&&activeProject) return (
     <Shell>
-      {showSearch&&<SearchOverlay projects={projects} members={members} onClose={()=>setShowSearch(false)} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>}
-      {editingNote&&<EditNoteModal note={editingNote} projectName={activeProject.name} meName={data.me||"me"} members={members} onSave={raw=>saveEditedNote(editingNote.id,raw)} onCancel={()=>setEditingNote(null)} saving={editSaving}/>}
+      {showSearch&&<SearchOverlay projects={projects} onClose={()=>setShowSearch(false)} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>}
+      {editingNote&&<EditNoteModal note={editingNote} projectName={activeProject.name} onSave={raw=>saveEditedNote(editingNote.id,raw)} onCancel={()=>setEditingNote(null)} saving={editSaving}/>}
       <FloatingSearch/>
       <Nav/>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:18,flexWrap:"wrap",gap:8}}>
@@ -921,7 +961,8 @@ Bullet list.
           :<p style={{color:T.muted,fontSize:"13px",margin:0}}>Status will appear after first note.</p>}
       </Card>
       <GroupLabel>Meeting Notes ({activeProject.notes.length})</GroupLabel>
-      {activeProject.notes.length===0?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No notes yet.</p></Card>
+      {activeProject.notes.length===0
+        ?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No notes yet.</p></Card>
         :[...activeProject.notes].reverse().map(n=>{
           const tagged=(n.taggedMembers||[]).map(id=>members.find(m=>m.id===id)).filter(Boolean);
           return(
@@ -936,14 +977,15 @@ Bullet list.
                     </div>
                   )}
                 </div>
-                <div style={{display:"flex",gap:5,flexShrink:0}}>
+                <div style={{display:"flex",gap:5,flexShrink:0,flexWrap:"wrap",justifyContent:"flex-end"}}>
                   <Btn variant="secondary" size="sm" onClick={()=>setExpandedNote(expandedNote===n.id?null:n.id)}>{expandedNote===n.id?"Hide":"View"}</Btn>
                   <Btn variant="secondary" size="sm" onClick={()=>setEditingNote(n)}>Edit</Btn>
                   <Btn variant="secondary" size="sm" onClick={()=>shareNote(n,activeProject.name)}>Share</Btn>
                   <Btn variant="danger" size="sm" onClick={()=>deleteNote(n.id)}>Del</Btn>
                 </div>
               </div>
-              {expandedNote===n.id?<div style={{borderTop:`1px solid ${T.border}`,paddingTop:10}}><MD content={n.summary} small/></div>
+              {expandedNote===n.id
+                ?<div style={{borderTop:`1px solid ${T.border}`,paddingTop:10}}><MD content={n.summary} small/></div>
                 :<p style={{fontSize:"12px",color:T.muted,margin:0,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{n.summary.replace(/[#*]/g,"").slice(0,110)}…</p>}
             </Card>
           );
