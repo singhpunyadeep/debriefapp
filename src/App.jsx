@@ -17,16 +17,35 @@ const avatarBg = name => { let h=0; for(const c of name) h=(h*31+c.charCodeAt(0)
 const initials = n => n.trim().split(/\s+/).map(w=>w[0].toUpperCase()).slice(0,2).join("");
 const fmt = iso => new Date(iso).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"});
 const fmtShort = iso => new Date(iso).toLocaleDateString("en-GB",{day:"numeric",month:"short"});
-const isThisWeek = iso => { const d=new Date(iso),now=new Date(),s=new Date(now); s.setDate(now.getDate()-now.getDay()+1); const e=new Date(s); e.setDate(s.getDate()+6); return d>=s&&d<=e; };
-const isNextWeek = iso => { const d=new Date(iso),now=new Date(),s=new Date(now); s.setDate(now.getDate()-now.getDay()+8); const e=new Date(s); e.setDate(s.getDate()+6); return d>=s&&d<=e; };
+
+// FIX #4: isThisWeek was broken on Sundays (getDay()=0 made week start "tomorrow").
+// Now treats Sunday as day 7 so Monday is always the correct week start.
+const isThisWeek = iso => {
+  const d=new Date(iso), now=new Date(), s=new Date(now);
+  const day = now.getDay() || 7;
+  s.setDate(now.getDate()-day+1); s.setHours(0,0,0,0);
+  const e=new Date(s); e.setDate(s.getDate()+6); e.setHours(23,59,59,999);
+  return d>=s && d<=e;
+};
+const isNextWeek = iso => {
+  const d=new Date(iso), now=new Date(), s=new Date(now);
+  const day = now.getDay() || 7;
+  s.setDate(now.getDate()-day+8); s.setHours(0,0,0,0);
+  const e=new Date(s); e.setDate(s.getDate()+6); e.setHours(23,59,59,999);
+  return d>=s && d<=e;
+};
 const isOverdue = iso => iso && new Date(iso)<new Date() && !isThisWeek(iso);
 
+// FIX #1: claude() now checks response status and throws on failure instead of
+// crashing with "cannot read .content of undefined".
 const claude = async (prompt, maxTokens=1500) => {
   const r = await fetch("/api/claude", {
     method:"POST", headers:{"Content-Type":"application/json"},
     body: JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:maxTokens,messages:[{role:"user",content:prompt}]})
   });
-  return (await r.json()).content.map(b=>b.text||"").join("");
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error || `API error ${r.status}`);
+  return data.content.map(b=>b.text||"").join("");
 };
 
 const parseJsonSafe = raw => {
@@ -34,27 +53,40 @@ const parseJsonSafe = raw => {
   catch { const m=raw.match(/[\[{][\s\S]*[\]}]/); if(m){try{return JSON.parse(m[0]);}catch{}} return null; }
 };
 
+// FIX #12: Sanitise HTML before dangerouslySetInnerHTML to prevent XSS from
+// AI-generated content. Strips script/style tags and event attributes.
+const sanitiseHtml = html =>
+  html
+    .replace(/<script[\s\S]*?<\/script>/gi,"")
+    .replace(/<style[\s\S]*?<\/style>/gi,"")
+    .replace(/\son\w+="[^"]*"/gi,"")
+    .replace(/\son\w+='[^']*'/gi,"")
+    .replace(/javascript:/gi,"");
+
 // ─── DB ───────────────────────────────────────────────────────────────────────
 const db = {
   async getUser() { const {data:{user}}=await supabase.auth.getUser(); return user; },
 
+  // FIX #2: loadAll now wraps each query in individual try/catch so a single
+  // missing table or RLS error doesn't hang the entire app on a null data state.
   async loadAll(userId) {
+    const safe = async (fn) => { try { return await fn(); } catch { return null; } };
     const [
-      {data:projects},{data:notes},{data:members},{data:noteMembers},
-      {data:todos},{data:homeSummary},{data:profile},
-      {data:decisions},{data:commitments},{data:risks},{data:qualityScores},
+      projects, notes, members, noteMembers,
+      todos, homeSummary, profile,
+      decisions, commitments, risks, qualityScores,
     ] = await Promise.all([
-      supabase.from('projects').select('*').eq('user_id',userId).order('created_at'),
-      supabase.from('notes').select('*').eq('user_id',userId).order('date'),
-      supabase.from('members').select('*').eq('user_id',userId).order('created_at'),
-      supabase.from('note_members').select('*'),
-      supabase.from('todos').select('*').eq('user_id',userId).order('created_at'),
-      supabase.from('home_summaries').select('*').eq('user_id',userId).maybeSingle(),
-      supabase.from('profiles').select('*').eq('id',userId).single(),
-      supabase.from('decisions').select('*').eq('user_id',userId).order('date'),
-      supabase.from('commitments').select('*').eq('user_id',userId).order('date'),
-      supabase.from('risks').select('*').eq('user_id',userId).eq('dismissed',false),
-      supabase.from('quality_scores').select('*').eq('user_id',userId),
+      safe(()=>supabase.from('projects').select('*').eq('user_id',userId).order('created_at').then(r=>r.data)),
+      safe(()=>supabase.from('notes').select('*').eq('user_id',userId).order('date').then(r=>r.data)),
+      safe(()=>supabase.from('members').select('*').eq('user_id',userId).order('created_at').then(r=>r.data)),
+      safe(()=>supabase.from('note_members').select('*').then(r=>r.data)),
+      safe(()=>supabase.from('todos').select('*').eq('user_id',userId).order('created_at').then(r=>r.data)),
+      safe(()=>supabase.from('home_summaries').select('*').eq('user_id',userId).maybeSingle().then(r=>r.data)),
+      safe(()=>supabase.from('profiles').select('*').eq('id',userId).single().then(r=>r.data)),
+      safe(()=>supabase.from('decisions').select('*').eq('user_id',userId).order('date').then(r=>r.data)),
+      safe(()=>supabase.from('commitments').select('*').eq('user_id',userId).order('date').then(r=>r.data)),
+      safe(()=>supabase.from('risks').select('*').eq('user_id',userId).eq('dismissed',false).then(r=>r.data)),
+      safe(()=>supabase.from('quality_scores').select('*').eq('user_id',userId).then(r=>r.data)),
     ]);
     return {
       projects: (projects||[]).map(p=>({
@@ -83,7 +115,27 @@ const db = {
   async updateProjectStatus(projectId,status) {
     await supabase.from('projects').update({status,status_updated_at:new Date().toISOString()}).eq('id',projectId);
   },
-  async deleteProject(projectId) { await supabase.from('projects').delete().eq('id',projectId); },
+
+  // FIX #3: deleteProject now explicitly deletes all child records before
+  // deleting the project itself, to avoid orphaned rows if ON DELETE CASCADE
+  // is not set in the Supabase schema.
+  async deleteProject(projectId) {
+    await Promise.all([
+      supabase.from('risks').delete().eq('project_id',projectId),
+      supabase.from('commitments').delete().eq('project_id',projectId),
+      supabase.from('decisions').delete().eq('project_id',projectId),
+      supabase.from('todos').update({project_id:null}).eq('project_id',projectId),
+    ]);
+    // Delete note_members for notes belonging to this project
+    const {data:projectNotes}=await supabase.from('notes').select('id').eq('project_id',projectId);
+    if(projectNotes?.length>0){
+      const noteIds=projectNotes.map(n=>n.id);
+      await supabase.from('quality_scores').delete().in('note_id',noteIds);
+      await supabase.from('note_members').delete().in('note_id',noteIds);
+    }
+    await supabase.from('notes').delete().eq('project_id',projectId);
+    await supabase.from('projects').delete().eq('id',projectId);
+  },
 
   async createNote(userId,projectId,{raw,summary,selfTagged,taggedMemberIds}) {
     const {data:note}=await supabase.from('notes').insert({user_id:userId,project_id:projectId,raw,summary,self_tagged:selfTagged,date:new Date().toISOString()}).select().single();
@@ -91,7 +143,11 @@ const db = {
     return {...note,selfTagged:note.self_tagged,taggedMembers:taggedMemberIds||[]};
   },
   async updateNote(noteId,{raw,summary}) { await supabase.from('notes').update({raw,summary}).eq('id',noteId); },
-  async deleteNote(noteId) { await supabase.from('notes').delete().eq('id',noteId); },
+  async deleteNote(noteId) {
+    await supabase.from('quality_scores').delete().eq('note_id',noteId);
+    await supabase.from('note_members').delete().eq('note_id',noteId);
+    await supabase.from('notes').delete().eq('id',noteId);
+  },
 
   async saveDecisions(userId,projectId,noteId,decisions) {
     if(!decisions?.length) return;
@@ -139,6 +195,8 @@ const db = {
 };
 
 // ─── UI Primitives ────────────────────────────────────────────────────────────
+
+// FIX #12: MD renderer now sanitises output before setting innerHTML.
 const MD = ({content,small}) => {
   const fs=small?"13px":"14px";
   const css=`.md h1{font-size:17px;font-weight:700;margin:12px 0 5px;font-family:${T.serif};color:${T.ink};text-align:left}.md h2{font-size:15px;font-weight:700;margin:10px 0 4px;font-family:${T.serif};color:${T.ink};text-align:left}.md h3{font-size:14px;font-weight:600;margin:8px 0 3px;color:${T.ink};text-align:left}.md strong{font-weight:600}.md ul,.md ol{margin:4px 0;padding-left:18px;text-align:left}.md li{margin:2px 0;font-size:${fs};text-align:left}.md ul li{list-style-type:disc}.md ol li{list-style-type:decimal}.md p{margin:4px 0;font-size:${fs};line-height:1.6;text-align:left;color:${T.ink}}`;
@@ -150,7 +208,7 @@ const MD = ({content,small}) => {
       if(bm||nm){const m=bm||nm,lvl=Math.floor(m[1].length/2),lt=bm?"ul":"ol";while(stk.length>lvl+1)out.push(`</${stk.pop()}>`);if(stk.length===lvl){out.push(`<${lt}>`);stk.push(lt);}out.push(`<li>${m[2]}</li>`);}
       else{while(stk.length)out.push(`</${stk.pop()}>`);out.push(line.trim()===""?"<br/>":line.match(/^<[^>]+>$/)?line:`<p>${line}</p>`);}
     }
-    while(stk.length)out.push(`</${stk.pop()}>`); return out.join("");
+    while(stk.length)out.push(`</${stk.pop()}>`); return sanitiseHtml(out.join(""));
   };
   return <><style>{css}</style><div className="md" dangerouslySetInnerHTML={{__html:render(content)}}/></>;
 };
@@ -207,6 +265,16 @@ const ScoreBadge = ({score}) => {
   return <span style={{background:c+"14",color:c,border:`1px solid ${c}30`,borderRadius:2,padding:"2px 8px",fontSize:"12px",fontWeight:700}}>{score}/10</span>;
 };
 
+// FIX #10: Toast component replaces alert() for clipboard feedback.
+const Toast = ({message,onDone}) => {
+  useEffect(()=>{const t=setTimeout(onDone,2200);return()=>clearTimeout(t);},[]);
+  return (
+    <div style={{position:"fixed",bottom:80,left:"50%",transform:"translateX(-50%)",background:T.ink,color:"#fff",padding:"9px 18px",borderRadius:4,fontSize:"13px",fontFamily:T.sans,zIndex:2000,whiteSpace:"nowrap",boxShadow:"0 4px 16px rgba(0,0,0,0.18)"}}>
+      {message}
+    </div>
+  );
+};
+
 // ─── Bottom Search / Ask Bar ───────────────────────────────────────────────────
 const BottomSearchBar = ({onClick}) => (
   <div style={{position:"fixed",bottom:16,left:"50%",transform:"translateX(-50%)",zIndex:900,width:"calc(100% - 32px)",maxWidth:500}}>
@@ -221,13 +289,13 @@ const BottomSearchBar = ({onClick}) => (
 // ─── Search + Ask Overlay ─────────────────────────────────────────────────────
 const SearchAskOverlay = ({projects,members,todos,onClose,onProjectNav}) => {
   const [q,setQ]=useState("");
-  const [mode,setMode]=useState("search"); // search | ask
+  const [mode,setMode]=useState("search");
   const [askAnswer,setAskAnswer]=useState("");
   const [asking,setAsking]=useState(false);
   const inputRef=useRef(null);
   useEffect(()=>{ setTimeout(()=>inputRef.current?.focus(),50); },[]);
 
-  const isQuestion = q.trim().endsWith("?")||q.trim().toLowerCase().startsWith("what")||q.trim().toLowerCase().startsWith("who")||q.trim().toLowerCase().startsWith("when")||q.trim().toLowerCase().startsWith("why")||q.trim().toLowerCase().startsWith("how")||q.trim().toLowerCase().startsWith("which")||q.trim().toLowerCase().startsWith("did")||q.trim().toLowerCase().startsWith("has")||q.trim().toLowerCase().startsWith("show");
+  const isQuestion = q.trim().endsWith("?")||/^(what|who|when|why|how|which|did|has|show)\b/i.test(q.trim());
 
   const results=useMemo(()=>{
     if(!q.trim()||mode==="ask") return [];
@@ -333,17 +401,32 @@ const TOUR_STEPS=[
   {target:"tour-nav",title:"Track your whole team",body:"Go to Team to add colleagues. Tag them in notes and Debrief builds an intelligence profile on each person across all projects."},
 ];
 
+// FIX #11: Tour tooltip now uses position:fixed consistently on desktop so it
+// doesn't mix absolute/fixed coordinate systems. On mobile it uses a bottom sheet
+// (unchanged). The desktop variant calculates viewport position correctly.
 const Tour=({onDone})=>{
   const [step,setStep]=useState(0);
   const [pos,setPos]=useState(null);
   const isMobile=window.innerWidth<600;
+
   useEffect(()=>{
-    const position=()=>{const el=document.getElementById(TOUR_STEPS[step].target);if(!el)return;const r=el.getBoundingClientRect();setPos({top:r.bottom+window.scrollY+10,left:r.left+window.scrollX});};
-    position();window.addEventListener('resize',position);return()=>window.removeEventListener('resize',position);
+    const position=()=>{
+      const el=document.getElementById(TOUR_STEPS[step].target);
+      if(!el)return;
+      const r=el.getBoundingClientRect();
+      // Use viewport coords for position:fixed (no scrollY offset needed)
+      setPos({top:r.bottom+10, left:Math.min(r.left, window.innerWidth-280)});
+    };
+    position();
+    window.addEventListener('resize',position);
+    window.addEventListener('scroll',position,true);
+    return()=>{window.removeEventListener('resize',position);window.removeEventListener('scroll',position,true);};
   },[step]);
+
   const next=()=>{if(step<TOUR_STEPS.length-1)setStep(s=>s+1);else onDone();};
   const prev=()=>{if(step>0)setStep(s=>s-1);};
   const curr=TOUR_STEPS[step];
+
   if(isMobile) return (
     <>
       <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:999}} onClick={onDone}/>
@@ -364,10 +447,11 @@ const Tour=({onDone})=>{
       </div>
     </>
   );
+
   return (
     <>
       <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.25)",zIndex:999}} onClick={onDone}/>
-      {pos&&<div style={{position:"absolute",top:pos.top,left:Math.min(pos.left,window.innerWidth-280),width:260,background:T.accent,color:"#fff",borderRadius:8,padding:"14px 16px",zIndex:1000,fontFamily:T.sans,boxSizing:"border-box"}}>
+      {pos&&<div style={{position:"fixed",top:pos.top,left:pos.left,width:260,background:T.accent,color:"#fff",borderRadius:8,padding:"14px 16px",zIndex:1000,fontFamily:T.sans,boxSizing:"border-box"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
           <span style={{fontSize:"13px",fontWeight:700}}>{curr.title}</span>
           <button onClick={onDone} style={{background:"none",border:"none",color:"rgba(255,255,255,0.6)",fontSize:14,cursor:"pointer",padding:0,marginLeft:8,flexShrink:0}}>✕</button>
@@ -484,7 +568,14 @@ export default function App() {
   const [newTodoProjectId,setNewTodoProjectId]=useState("");
   const [newTodoMemberId,setNewTodoMemberId]=useState("");
   const [todoFilter,setTodoFilter]=useState("pending");
-  const [activeProjectTab,setActiveProjectTab]=useState("notes"); // notes | decisions | commitments | risks
+  const [activeProjectTab,setActiveProjectTab]=useState("notes");
+  // FIX #10: toast state replaces alert()
+  const [toast,setToast]=useState(null);
+
+  // Store tagged members in a ref so the clarifying-phase finalise
+  // always gets the correct value even across async boundaries (FIX #6 hardening)
+  const taggedMembersRef=useRef([]);
+  const taggedSelfRef=useRef(false);
 
   useEffect(()=>{
     db.getUser().then(user=>{
@@ -505,7 +596,7 @@ export default function App() {
   const activeMember=activeMemberId?members.find(m=>m.id===activeMemberId):null;
   const undismissedRisks=allRisks.filter(r=>!r.dismissed);
 
-  const reload=async()=>{if(!userId)return;const d=await db.loadAll(userId);setData(d);return d;};
+  const reload=async()=>{if(!userId)return null;const d=await db.loadAll(userId);setData(d);return d;};
   const meInNotes=text=>data?.me&&text.toLowerCase().includes(data.me.toLowerCase());
   const extractMentions=text=>members.filter(m=>text.toLowerCase().includes(m.name.toLowerCase())||text.includes(`@${m.name}`));
 
@@ -536,10 +627,12 @@ ${summary}`,600);
     }catch{return{decisions:[],commitments:[],risks:[],quality:null,contradictions:[]};}
   };
 
+  // FIX #8: generateHomeSummary now fetches fresh data instead of reading the
+  // stale `data` closure, so notes added just before clicking Refresh are included.
   const generateHomeSummary=async()=>{
     if(!userId)return;setHomeLoading(true);
     try{
-      const d=data;
+      const d=await db.loadAll(userId);
       const projectContext=d.projects.map(p=>{
         const openTasks=(d.todos||[]).filter(t=>!t.done&&t.projectId===p.id);
         const doneTasks=(d.todos||[]).filter(t=>t.done&&t.projectId===p.id);
@@ -651,6 +744,9 @@ Bullet list of tasks not tied to any project. If none write "None."
     if(!notesVal.trim()){setError("Please enter notes.");return;}
     setNotes(notesVal);setError("");setLoading(true);
     const mentioned=extractMentions(notesVal),selfTagged=meInNotes(notesVal);
+    // FIX #6: Store in refs so finaliseNote always reads correct values
+    taggedMembersRef.current=mentioned;
+    taggedSelfRef.current=selfTagged;
     setTaggedMembers(mentioned);setTaggedSelf(selfTagged);
     try{
       const prior=buildPriorCtx(activeProject);
@@ -664,17 +760,18 @@ Bullet list of tasks not tied to any project. If none write "None."
 
   const finaliseNote=async(notesVal,ans,mentionedOvr,selfOvr)=>{
     setLoading(true);setError("");
-    const n=notesVal||notes,mentioned=mentionedOvr||taggedMembers,selfMentioned=selfOvr??taggedSelf;
+    // FIX #6: Fall back to refs if overrides not provided (clarifying-phase path)
+    const n=notesVal||notes;
+    const mentioned=mentionedOvr??taggedMembersRef.current;
+    const selfMentioned=selfOvr??taggedSelfRef.current;
     try{
       const clarifs=questions.length>0?"\n\nClarifications:\n"+questions.map((q,i)=>ans[i]?`Q: ${q}\nA: ${ans[i]}`:null).filter(Boolean).join("\n"):"";
       const summary=await claude(`Convert to structured summary:\n1. Overview\n2. Key decisions\n3. Action items\n4. Discussion\n5. Next steps\nUse markdown.\n\nNotes:\n${n}${clarifs}`,1200);
 
       const note=await db.createNote(userId,activeProject.id,{raw:n,summary,selfTagged:selfMentioned,taggedMemberIds:mentioned.map(m=>m.id)});
 
-      // Run intelligence extraction in parallel
       const intel=await extractIntelligence(summary,note.id,activeProject.id,activeProject.name,activeProject.notes);
 
-      // Save all extracted intelligence
       await Promise.all([
         intel.decisions?.length>0?db.saveDecisions(userId,activeProject.id,note.id,intel.decisions):Promise.resolve(),
         intel.commitments?.length>0?db.saveCommitments(userId,activeProject.id,note.id,intel.commitments,members):Promise.resolve(),
@@ -694,12 +791,14 @@ Bullet list of tasks not tied to any project. If none write "None."
 
       for(const m of mentioned){
         const allM=[];
-        for(const p of(d.projects||[])) for(const note of p.notes) if(note.raw.toLowerCase().includes(m.name.toLowerCase())||note.taggedMembers?.includes(m.id)) allM.push({project:p.name,date:note.date,summary:note.summary});
+        for(const p of(d.projects||[])) for(const nn of p.notes) if(nn.raw.toLowerCase().includes(m.name.toLowerCase())||nn.taggedMembers?.includes(m.id)) allM.push({project:p.name,date:nn.date,summary:nn.summary});
         if(allM.length>0){try{const ms=await claude(`Summarise ${m.name}'s activity.\n\n${allM.map(a=>`[${a.project}] ${fmt(a.date)}:\n${a.summary}`).join("\n\n---\n\n")}`,700);await db.updateMemberSummary(m.id,ms);}catch{}}
       }
 
       await reload();
-      setNotes("");setQuestions([]);setAnswers({});setTaggedMembers([]);setTaggedSelf(false);setNotePhase("input");
+      setNotes("");setQuestions([]);setAnswers({});setTaggedMembers([]);setTaggedSelf(false);
+      taggedMembersRef.current=[];taggedSelfRef.current=false;
+      setNotePhase("input");
       setView("project");
     }catch(e){setError("Failed to save. Please try again.");console.error(e);}
     finally{setLoading(false);}
@@ -724,13 +823,23 @@ Bullet list of tasks not tied to any project. If none write "None."
     }catch(e){console.error(e);}finally{setEditSaving(false);}
   };
 
+  // FIX #10: shareNote now uses Toast instead of alert()
   const shareNote=async(note,projectName)=>{
     const text=`${projectName} — ${fmt(note.date)}\n\n${note.summary.replace(/[#*]/g,"").trim()}`;
-    if(navigator.share){try{await navigator.share({title:`Debrief — ${projectName}`,text});}catch{}}
-    else{await navigator.clipboard.writeText(text);alert("Summary copied to clipboard!");}
+    if(navigator.share){try{await navigator.share({title:`Debrief — ${projectName}`,text});return;}catch{}}
+    try{
+      await navigator.clipboard.writeText(text);
+      setToast("Summary copied to clipboard");
+    }catch{setToast("Copy failed — please copy manually");}
   };
 
-  const deleteProject=async idx=>{await db.deleteProject(projects[idx].id);await reload();setView("home");setActiveIdx(null);};
+  // FIX #9: deleteProject now requires confirmation before proceeding.
+  const deleteProject=async idx=>{
+    const name=projects[idx]?.name||"this project";
+    if(!window.confirm(`Delete "${name}"? This will permanently remove all notes, decisions, commitments and risks. This cannot be undone.`))return;
+    await db.deleteProject(projects[idx].id);
+    await reload();setView("home");setActiveIdx(null);
+  };
 
   const pendingTodos=todos.filter(t=>!t.done);
   const doneTodos=todos.filter(t=>t.done);
@@ -794,12 +903,12 @@ Bullet list of tasks not tied to any project. If none write "None."
   // ── HOME ────────────────────────────────────────────────────────────────────
   if(view==="home") return (
     <Shell>
+      {toast&&<Toast message={toast} onDone={()=>setToast(null)}/>}
       <SearchEl/>
       {showTour&&<Tour onDone={handleTourDone}/>}
       <BottomSearchBar onClick={()=>setShowSearch(true)}/>
       <Nav/>
 
-      {/* Risk Radar */}
       {undismissedRisks.length>0&&(
         <Card style={{marginBottom:14,borderLeft:`3px solid ${T.danger}`}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
@@ -825,7 +934,6 @@ Bullet list of tasks not tied to any project. If none write "None."
         </Card>
       )}
 
-      {/* Weekly Briefing */}
       <Card accent={T.accent} style={{marginBottom:14}}>
         <div id="tour-briefing" style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,gap:8,flexWrap:"wrap"}}>
           <div>
@@ -871,6 +979,7 @@ Bullet list of tasks not tied to any project. If none write "None."
   // ── TODOS ───────────────────────────────────────────────────────────────────
   if(view==="todos") return (
     <Shell>
+      {toast&&<Toast message={toast} onDone={()=>setToast(null)}/>}
       <SearchEl/>
       <BottomSearchBar onClick={()=>setShowSearch(true)}/>
       <Nav/>
@@ -907,6 +1016,7 @@ Bullet list of tasks not tied to any project. If none write "None."
   // ── TEAM ────────────────────────────────────────────────────────────────────
   if(view==="team") return (
     <Shell>
+      {toast&&<Toast message={toast} onDone={()=>setToast(null)}/>}
       <SearchEl/>
       <BottomSearchBar onClick={()=>setShowSearch(true)}/>
       <Nav/>
@@ -947,6 +1057,7 @@ Bullet list of tasks not tied to any project. If none write "None."
   // ── MEMBER VIEW ─────────────────────────────────────────────────────────────
   if(view==="memberView"&&activeMember) return (
     <Shell>
+      {toast&&<Toast message={toast} onDone={()=>setToast(null)}/>}
       <SearchEl/>
       <BottomSearchBar onClick={()=>setShowSearch(true)}/>
       <Nav/>
@@ -963,7 +1074,6 @@ Bullet list of tasks not tied to any project. If none write "None."
         </div>
       </div>
 
-      {/* Stakeholder Intelligence */}
       {activeMember.intelligence&&(
         <Card style={{marginBottom:10,background:T.accentLight,border:`1px solid ${T.accentMid}30`}}>
           <h3 style={{margin:"0 0 8px",fontSize:"13px",fontWeight:700,color:T.accent,letterSpacing:"0.04em",textTransform:"uppercase"}}>Stakeholder Intelligence</h3>
@@ -971,7 +1081,6 @@ Bullet list of tasks not tied to any project. If none write "None."
         </Card>
       )}
 
-      {/* Activity Summary */}
       <Card accent={avatarBg(activeMember.name)}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,flexWrap:"wrap",gap:6}}>
           <h2 style={{margin:0,fontFamily:T.serif,fontSize:"15px",fontWeight:700,color:T.ink}}>Activity Summary</h2>
@@ -982,7 +1091,6 @@ Bullet list of tasks not tied to any project. If none write "None."
           :<p style={{color:T.muted,fontSize:"13px",margin:0}}>Tag @{activeMember.name} in notes or click Generate.</p>}
       </Card>
 
-      {/* Commitments */}
       {(()=>{
         const memberCommitments=projects.flatMap(p=>(p.commitments||[]).filter(c=>c.member_id===activeMember.id).map(c=>({...c,projectName:p.name})));
         if(!memberCommitments.length)return null;
@@ -1003,7 +1111,6 @@ Bullet list of tasks not tied to any project. If none write "None."
         );
       })()}
 
-      {/* Notes */}
       {(()=>{
         const mentions=[];
         for(const p of projects) for(const n of p.notes) if(n.taggedMembers?.includes(activeMember.id)||n.raw.toLowerCase().includes(activeMember.name.toLowerCase())) mentions.push({...n,projectName:p.name,projIdx:projects.findIndex(pp=>pp.name===p.name)});
@@ -1040,6 +1147,7 @@ Bullet list of tasks not tied to any project. If none write "None."
   // ── PROJECT VIEW ────────────────────────────────────────────────────────────
   if(view==="project"&&activeProject) return (
     <Shell>
+      {toast&&<Toast message={toast} onDone={()=>setToast(null)}/>}
       <SearchEl/>
       {editingNote&&<EditNoteModal note={editingNote} projectName={activeProject.name} onSave={raw=>saveEditedNote(editingNote.id,raw)} onCancel={()=>setEditingNote(null)} saving={editSaving}/>}
       <BottomSearchBar onClick={()=>setShowSearch(true)}/>
@@ -1056,7 +1164,6 @@ Bullet list of tasks not tied to any project. If none write "None."
         </div>
       </div>
 
-      {/* Open Tasks */}
       {todos.filter(t=>t.projectId===activeProject.id&&!t.done).length>0&&(
         <Card>
           <h3 style={{margin:"0 0 8px",fontSize:"13px",fontWeight:600,color:T.ink}}>My Open Tasks</h3>
@@ -1064,7 +1171,6 @@ Bullet list of tasks not tied to any project. If none write "None."
         </Card>
       )}
 
-      {/* Project Status */}
       <Card accent={pc(activeIdx)}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,flexWrap:"wrap",gap:6}}>
           <h2 style={{margin:0,fontFamily:T.serif,fontSize:"15px",fontWeight:700,color:T.ink}}>Project Status</h2>
@@ -1075,7 +1181,6 @@ Bullet list of tasks not tied to any project. If none write "None."
           :<p style={{color:T.muted,fontSize:"13px",margin:0}}>Status will appear after first note.</p>}
       </Card>
 
-      {/* Tabs: Notes | Decisions | Commitments | Risks */}
       <div style={{display:"flex",gap:0,borderBottom:`1px solid ${T.border}`,marginBottom:12,marginTop:4}}>
         {[
           ["notes",`Notes (${activeProject.notes.length})`],
@@ -1089,7 +1194,6 @@ Bullet list of tasks not tied to any project. If none write "None."
         ))}
       </div>
 
-      {/* Notes Tab */}
       {activeProjectTab==="notes"&&(
         activeProject.notes.length===0?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No notes yet.</p></Card>
         :[...activeProject.notes].reverse().map(n=>{
@@ -1124,7 +1228,6 @@ Bullet list of tasks not tied to any project. If none write "None."
         })
       )}
 
-      {/* Decisions Tab */}
       {activeProjectTab==="decisions"&&(
         (activeProject.decisions||[]).length===0
           ?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No decisions extracted yet. Decisions are auto-detected when you add meeting notes.</p></Card>
@@ -1139,7 +1242,6 @@ Bullet list of tasks not tied to any project. If none write "None."
           ))
       )}
 
-      {/* Commitments Tab */}
       {activeProjectTab==="commitments"&&(
         (activeProject.commitments||[]).length===0
           ?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No commitments extracted yet. Commitments are auto-detected when you add meeting notes.</p></Card>
@@ -1164,7 +1266,6 @@ Bullet list of tasks not tied to any project. If none write "None."
           })
       )}
 
-      {/* Risks Tab */}
       {activeProjectTab==="risks"&&(
         (activeProject.risks||[]).filter(r=>!r.dismissed).length===0
           ?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No active risks. Risks are auto-detected from meeting notes.</p></Card>
