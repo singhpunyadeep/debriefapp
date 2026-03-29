@@ -4,8 +4,7 @@ import { supabase } from "./AuthWrapper.jsx";
 const T = {
   bg: "#F5F4F0", white: "#FFFFFF", ink: "#1A1A1A", mid: "#6B6B6B",
   muted: "#A8A8A8", border: "#E0DFDB", accent: "#003366",
-  accentLight: "#E8EEF5", accentMid: "#5580AA",
-  danger: "#B91C1C",
+  accentLight: "#E8EEF5", accentMid: "#5580AA", danger: "#B91C1C",
   serif: "Georgia, 'Times New Roman', serif",
   sans: "Inter, 'Helvetica Neue', Arial, sans-serif",
 };
@@ -20,14 +19,13 @@ const isThisWeek = iso => { const d=new Date(iso),now=new Date(),s=new Date(now)
 const isNextWeek = iso => { const d=new Date(iso),now=new Date(),s=new Date(now); s.setDate(now.getDate()-now.getDay()+8); const e=new Date(s); e.setDate(s.getDate()+6); return d>=s&&d<=e; };
 const isOverdue = iso => iso && new Date(iso)<new Date() && !isThisWeek(iso);
 
+// ─── Claude API ───────────────────────────────────────────────────────────────
 const claude = async (prompt, maxTokens=1500) => {
   const r = await fetch("/api/claude", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model:"claude-sonnet-4-20250514", max_tokens:maxTokens, messages:[{role:"user",content:prompt}] })
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:maxTokens,messages:[{role:"user",content:prompt}]})
   });
-  const d = await r.json();
-  return d.content.map(b=>b.text||"").join("");
+  return (await r.json()).content.map(b=>b.text||"").join("");
 };
 
 const parseJsonSafe = raw => {
@@ -35,13 +33,12 @@ const parseJsonSafe = raw => {
   catch { const m=raw.match(/\[[\s\S]*\]/); if(m){try{return JSON.parse(m[0]);}catch{}} return null; }
 };
 
-// ─── Supabase data functions ──────────────────────────────────────────────────
+// ─── Supabase DB layer ────────────────────────────────────────────────────────
 const db = {
   async getUser() {
     const { data: { user } } = await supabase.auth.getUser();
     return user;
   },
-
   async loadAll(userId) {
     const [
       { data: projects },
@@ -52,123 +49,74 @@ const db = {
       { data: homeSummary },
       { data: profile },
     ] = await Promise.all([
-      supabase.from('projects').select('*').eq('user_id', userId).order('created_at'),
-      supabase.from('notes').select('*').eq('user_id', userId).order('date'),
-      supabase.from('members').select('*').eq('user_id', userId).order('created_at'),
+      supabase.from('projects').select('*').eq('user_id',userId).order('created_at'),
+      supabase.from('notes').select('*').eq('user_id',userId).order('date'),
+      supabase.from('members').select('*').eq('user_id',userId).order('created_at'),
       supabase.from('note_members').select('*'),
-      supabase.from('todos').select('*').eq('user_id', userId).order('created_at'),
-      supabase.from('home_summaries').select('*').eq('user_id', userId).maybeSingle(),,
-      supabase.from('profiles').select('*').eq('id', userId).single(),
+      supabase.from('todos').select('*').eq('user_id',userId).order('created_at'),
+      supabase.from('home_summaries').select('*').eq('user_id',userId).maybeSingle(),
+      supabase.from('profiles').select('*').eq('id',userId).single(),
     ]);
-
-    const projectsWithNotes = (projects||[]).map(p => ({
-      ...p,
-      statusUpdated: p.status_updated_at,
-      notes: (notes||[]).filter(n=>n.project_id===p.id).map(n => ({
-        ...n,
-        selfTagged: n.self_tagged,
-        taggedMembers: (noteMembers||[]).filter(nm=>nm.note_id===n.id).map(nm=>nm.member_id),
-      })),
-    }));
-
     return {
-      projects: projectsWithNotes,
+      projects: (projects||[]).map(p=>({...p,statusUpdated:p.status_updated_at,notes:(notes||[]).filter(n=>n.project_id===p.id).map(n=>({...n,selfTagged:n.self_tagged,taggedMembers:(noteMembers||[]).filter(nm=>nm.note_id===n.id).map(nm=>nm.member_id)}))})),
       members: members||[],
-      todos: (todos||[]).map(t=>({...t, dueDate:t.due_date, projectId:t.project_id, doneAt:t.done_at})),
-      me: profile?.name || null,
-      homeWeeklySummary: homeSummary?.summary || null,
-      homeWeeklySummaryDate: homeSummary?.updated_at || null,
+      todos: (todos||[]).map(t=>({...t,dueDate:t.due_date,projectId:t.project_id,doneAt:t.done_at})),
+      me: profile?.name||null,
+      tourDone: profile?.tour_done||false,
+      homeWeeklySummary: homeSummary?.summary||null,
+      homeWeeklySummaryDate: homeSummary?.updated_at||null,
     };
   },
-
-  async createProject(userId, name) {
-    const { data } = await supabase.from('projects').insert({ user_id:userId, name }).select().single();
-    return { ...data, notes:[], status:null, statusUpdated:null };
+  async createProject(userId,name) {
+    const {data}=await supabase.from('projects').insert({user_id:userId,name}).select().single();
+    return {...data,notes:[],status:null,statusUpdated:null};
   },
-
-  async updateProjectStatus(projectId, status) {
-    await supabase.from('projects').update({ status, status_updated_at:new Date().toISOString() }).eq('id', projectId);
+  async updateProjectStatus(projectId,status) {
+    await supabase.from('projects').update({status,status_updated_at:new Date().toISOString()}).eq('id',projectId);
   },
-
-  async deleteProject(projectId) {
-    await supabase.from('projects').delete().eq('id', projectId);
+  async deleteProject(projectId) { await supabase.from('projects').delete().eq('id',projectId); },
+  async createNote(userId,projectId,{raw,summary,selfTagged,taggedMemberIds}) {
+    const {data:note}=await supabase.from('notes').insert({user_id:userId,project_id:projectId,raw,summary,self_tagged:selfTagged,date:new Date().toISOString()}).select().single();
+    if(taggedMemberIds?.length>0) await supabase.from('note_members').insert(taggedMemberIds.map(member_id=>({note_id:note.id,member_id})));
+    return {...note,selfTagged:note.self_tagged,taggedMembers:taggedMemberIds||[]};
   },
-
-  async createNote(userId, projectId, { raw, summary, selfTagged, taggedMemberIds }) {
-    const { data: note } = await supabase.from('notes').insert({
-      user_id:userId, project_id:projectId, raw, summary,
-      self_tagged:selfTagged, date:new Date().toISOString(),
-    }).select().single();
-    if(taggedMemberIds?.length > 0) {
-      await supabase.from('note_members').insert(taggedMemberIds.map(member_id=>({ note_id:note.id, member_id })));
-    }
-    return { ...note, selfTagged:note.self_tagged, taggedMembers:taggedMemberIds||[] };
-  },
-
-  async deleteNote(noteId) {
-    await supabase.from('notes').delete().eq('id', noteId);
-  },
-
-  async createMember(userId, { name, role }) {
-    const { data } = await supabase.from('members').insert({ user_id:userId, name, role }).select().single();
+  async deleteNote(noteId) { await supabase.from('notes').delete().eq('id',noteId); },
+  async createMember(userId,{name,role}) {
+    const {data}=await supabase.from('members').insert({user_id:userId,name,role}).select().single();
     return data;
   },
-
-  async updateMemberSummary(memberId, summary) {
-    await supabase.from('members').update({ summary, summary_updated_at:new Date().toISOString() }).eq('id', memberId);
+  async updateMemberSummary(memberId,summary) {
+    await supabase.from('members').update({summary,summary_updated_at:new Date().toISOString()}).eq('id',memberId);
   },
-
-  async deleteMember(memberId) {
-    await supabase.from('members').delete().eq('id', memberId);
+  async deleteMember(memberId) { await supabase.from('members').delete().eq('id',memberId); },
+  async createTodo(userId,{text,dueDate,projectId,source='manual'}) {
+    const {data}=await supabase.from('todos').insert({user_id:userId,text,due_date:dueDate||null,project_id:projectId||null,source}).select().single();
+    return {...data,dueDate:data.due_date,projectId:data.project_id};
   },
-
-  async createTodo(userId, { text, dueDate, projectId, source='manual' }) {
-    const { data } = await supabase.from('todos').insert({
-      user_id:userId, text, due_date:dueDate||null, project_id:projectId||null, source,
-    }).select().single();
-    return { ...data, dueDate:data.due_date, projectId:data.project_id };
+  async toggleTodo(todoId,done) {
+    await supabase.from('todos').update({done,done_at:done?new Date().toISOString():null}).eq('id',todoId);
   },
-
-  async toggleTodo(todoId, done) {
-    await supabase.from('todos').update({ done, done_at:done?new Date().toISOString():null }).eq('id', todoId);
+  async deleteTodo(todoId) { await supabase.from('todos').delete().eq('id',todoId); },
+  async upsertHomeSummary(userId,summary) {
+    await supabase.from('home_summaries').upsert({user_id:userId,summary,updated_at:new Date().toISOString()});
   },
-
-  async deleteTodo(todoId) {
-    await supabase.from('todos').delete().eq('id', todoId);
+  async setName(userId,name) {
+    await supabase.from('profiles').upsert({id:userId,name});
   },
-
-  async upsertHomeSummary(userId, summary) {
-    await supabase.from('home_summaries').upsert({ user_id:userId, summary, updated_at:new Date().toISOString() });
-  },
-
-  async setName(userId, name) {
-    await supabase.from('profiles').upsert({ id:userId, name });
-  },
-
   async completeTour(userId) {
-    await supabase.from('profiles').update({ tour_done: true }).eq('id', userId);
-  },
-
-  async getTourDone(userId) {
-    const { data } = await supabase.from('profiles').select('tour_done').eq('id', userId).single();
-    return data?.tour_done || false;
+    await supabase.from('profiles').update({tour_done:true}).eq('id',userId);
   },
 };
 
 // ─── UI primitives ────────────────────────────────────────────────────────────
-const MD = ({ content, small }) => {
-  const fs = small?"13px":"14px";
-  const css = `.md h1{font-size:17px;font-weight:700;margin:12px 0 5px;font-family:${T.serif};color:${T.ink}}.md h2{font-size:15px;font-weight:700;margin:10px 0 4px;font-family:${T.serif};color:${T.ink}}.md h3{font-size:${fs};font-weight:600;margin:8px 0 3px;color:${T.ink}}.md strong{font-weight:600}.md ul,.md ol{margin:4px 0;padding-left:18px}.md li{margin:2px 0;font-size:${fs}}.md ul li{list-style-type:disc}.md ol li{list-style-type:decimal}.md p{margin:4px 0;font-size:${fs};line-height:1.6}`;
-  const render = t => {
+const MD = ({content,small}) => {
+  const fs=small?"13px":"14px";
+  const css=`.md h1{font-size:17px;font-weight:700;margin:12px 0 5px;font-family:${T.serif};color:${T.ink}}.md h2{font-size:15px;font-weight:700;margin:10px 0 4px;font-family:${T.serif};color:${T.ink}}.md h3{font-size:${fs};font-weight:600;margin:8px 0 3px;color:${T.ink}}.md strong{font-weight:600}.md ul,.md ol{margin:4px 0;padding-left:18px}.md li{margin:2px 0;font-size:${fs}}.md ul li{list-style-type:disc}.md ol li{list-style-type:decimal}.md p{margin:4px 0;font-size:${fs};line-height:1.6}`;
+  const render=t=>{
     let h=t.replace(/\*\*(.*?)\*\*/g,"<strong>$1</strong>").replace(/^### (.+)$/gm,"<h3>$1</h3>").replace(/^## (.+)$/gm,"<h2>$1</h2>").replace(/^# (.+)$/gm,"<h1>$1</h1>");
     const lines=h.split("\n"),out=[],stk=[];
-    for(const line of lines){
-      const bm=line.match(/^(\s*)[-*+] (.+)$/),nm=line.match(/^(\s*)\d+\.\s(.+)$/);
-      if(bm||nm){const m=bm||nm,lvl=Math.floor(m[1].length/2),lt=bm?"ul":"ol";while(stk.length>lvl+1)out.push(`</${stk.pop()}>`);if(stk.length===lvl){out.push(`<${lt}>`);stk.push(lt);}out.push(`<li>${m[2]}</li>`);}
-      else{while(stk.length)out.push(`</${stk.pop()}>`);out.push(line.trim()===""?"<br/>":line.match(/^<[^>]+>$/)?line:`<p>${line}</p>`);}
-    }
-    while(stk.length)out.push(`</${stk.pop()}>`);
-    return out.join("");
+    for(const line of lines){const bm=line.match(/^(\s*)[-*+] (.+)$/),nm=line.match(/^(\s*)\d+\.\s(.+)$/);if(bm||nm){const m=bm||nm,lvl=Math.floor(m[1].length/2),lt=bm?"ul":"ol";while(stk.length>lvl+1)out.push(`</${stk.pop()}>`);if(stk.length===lvl){out.push(`<${lt}>`);stk.push(lt);}out.push(`<li>${m[2]}</li>`);}else{while(stk.length)out.push(`</${stk.pop()}>`);out.push(line.trim()===""?"<br/>":line.match(/^<[^>]+>$/)?line:`<p>${line}</p>`);}}
+    while(stk.length)out.push(`</${stk.pop()}>`);return out.join("");
   };
   return <><style>{css}</style><div className="md" dangerouslySetInnerHTML={{__html:render(content)}}/></>;
 };
@@ -180,7 +128,7 @@ const Av = ({name,size=28,isSelf=false}) => (
 );
 
 const Btn = ({children,onClick,disabled,variant="primary",size="md"}) => {
-  const pad=size==="sm"?"5px 10px":"9px 16px", fs=size==="sm"?"12px":"13px";
+  const pad=size==="sm"?"5px 10px":"9px 16px",fs=size==="sm"?"12px":"13px";
   const v={primary:{background:T.accent,color:"#fff",border:`1px solid ${T.accent}`},secondary:{background:"transparent",color:T.ink,border:`1px solid ${T.border}`},ghost:{background:"transparent",color:T.mid,border:"none"},danger:{background:"transparent",color:T.danger,border:`1px solid ${T.danger}`}};
   return <button onClick={onClick} disabled={disabled} style={{...v[variant],padding:pad,fontSize:fs,fontWeight:500,cursor:disabled?"not-allowed":"pointer",borderRadius:2,fontFamily:T.sans,opacity:disabled?0.5:1,whiteSpace:"nowrap",flexShrink:0}}>{children}</button>;
 };
@@ -213,75 +161,52 @@ const GroupLabel = ({children,color=T.mid}) => (
   <p style={{margin:"14px 0 6px",fontSize:"10px",fontWeight:700,letterSpacing:"0.09em",textTransform:"uppercase",color}}>{children}</p>
 );
 
-// ─── Onboarding Tour ─────────────────────────────────────────────────────────
+// ─── Onboarding Tour ──────────────────────────────────────────────────────────
 const TOUR_STEPS = [
-  {
-    target: "tour-briefing",
-    title: "Your weekly briefing",
-    body: "Debrief writes you a smart weekly summary — what you accomplished, what's pending, and what to focus on next week.",
-  },
-  {
-    target: "tour-tasks",
-    title: "Tasks, auto-extracted",
-    body: "Tag yourself with @YourName in meeting notes. Debrief pulls out your action items automatically and adds them here.",
-  },
-  {
-    target: "tour-project",
-    title: "Create a project",
-    body: "Group meeting notes by project — a client, a team, or any initiative. Each project gets its own live status summary.",
-  },
-  {
-    target: "tour-nav",
-    title: "My Tasks & Team",
-    body: "Track all your tasks across projects in one place. Add team members and tag them in notes to track their activity too.",
-  },
+  {target:"tour-briefing",title:"Your weekly briefing",body:"Debrief writes you a smart weekly summary — what you accomplished, what's pending, and what to focus on next week."},
+  {target:"tour-tasks",title:"Tasks, auto-extracted",body:"Tag yourself with @YourName in meeting notes. Debrief pulls out your action items automatically and adds them here."},
+  {target:"tour-project",title:"Create a project",body:"Group meeting notes by project — a client, a team, or any initiative. Each project gets its own live status summary."},
+  {target:"tour-nav",title:"My Tasks & Team",body:"Track all your tasks across projects in one place. Add team members and tag them in notes to track their activity too."},
 ];
 
-const Tour = ({ onDone }) => {
-  const [step, setStep] = useState(0);
-  const [pos, setPos] = useState(null);
-  const isMobile = window.innerWidth < 600;
+const Tour = ({onDone}) => {
+  const [step,setStep]=useState(0);
+  const [pos,setPos]=useState(null);
+  const isMobile=window.innerWidth<600;
 
-  useEffect(() => {
-    positionTooltip();
-    window.addEventListener('resize', positionTooltip);
-    return () => window.removeEventListener('resize', positionTooltip);
-  }, [step]);
+  useEffect(()=>{
+    const position=()=>{
+      const el=document.getElementById(TOUR_STEPS[step].target);
+      if(!el) return;
+      const r=el.getBoundingClientRect();
+      setPos({top:r.bottom+window.scrollY+10,left:r.left+window.scrollX,width:r.width});
+    };
+    position();
+    window.addEventListener('resize',position);
+    return ()=>window.removeEventListener('resize',position);
+  },[step]);
 
-  const positionTooltip = () => {
-    const el = document.getElementById(TOUR_STEPS[step].target);
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    setPos({ top: r.bottom + window.scrollY + 10, left: r.left + window.scrollX, width: r.width });
-  };
+  const next=()=>{if(step<TOUR_STEPS.length-1)setStep(s=>s+1);else onDone();};
+  const prev=()=>{if(step>0)setStep(s=>s-1);};
+  const curr=TOUR_STEPS[step];
 
-  const next = () => { if(step < TOUR_STEPS.length - 1) setStep(s=>s+1); else onDone(); };
-  const prev = () => { if(step > 0) setStep(s=>s-1); };
-  const curr = TOUR_STEPS[step];
-
-  // Mobile: bottom sheet
-  if (isMobile) return (
+  if(isMobile) return (
     <>
       <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:999}} onClick={onDone}/>
-      <div style={{position:"fixed",bottom:0,left:0,right:0,background:"#fff",borderRadius:"16px 16px 0 0",
-        padding:"24px 20px 36px",zIndex:1000,fontFamily:"Inter,sans-serif"}}>
+      <div style={{position:"fixed",bottom:0,left:0,right:0,background:"#fff",borderRadius:"16px 16px 0 0",padding:"24px 20px 36px",zIndex:1000,fontFamily:T.sans}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
-          <span style={{fontSize:"11px",fontWeight:700,letterSpacing:"0.07em",color:"#A8A8A8",textTransform:"uppercase"}}>
-            Step {step+1} of {TOUR_STEPS.length}
-          </span>
-          <button onClick={onDone} style={{background:"none",border:"none",color:"#A8A8A8",fontSize:18,cursor:"pointer",padding:0}}>✕</button>
+          <span style={{fontSize:"11px",fontWeight:700,letterSpacing:"0.07em",color:T.muted,textTransform:"uppercase"}}>Step {step+1} of {TOUR_STEPS.length}</span>
+          <button onClick={onDone} style={{background:"none",border:"none",color:T.muted,fontSize:18,cursor:"pointer",padding:0}}>✕</button>
         </div>
-        <h3 style={{margin:"0 0 8px",fontSize:"18px",fontWeight:700,fontFamily:"Georgia,serif",color:"#1A1A1A"}}>{curr.title}</h3>
-        <p style={{margin:"0 0 20px",fontSize:"14px",color:"#6B6B6B",lineHeight:1.6}}>{curr.body}</p>
+        <h3 style={{margin:"0 0 8px",fontSize:"18px",fontWeight:700,fontFamily:T.serif,color:T.ink}}>{curr.title}</h3>
+        <p style={{margin:"0 0 20px",fontSize:"14px",color:T.mid,lineHeight:1.6}}>{curr.body}</p>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
           <div style={{display:"flex",gap:5}}>
-            {TOUR_STEPS.map((_,i)=>(
-              <div key={i} style={{width:6,height:6,borderRadius:"50%",background:i===step?"#003366":"#E0DFDB"}}/>
-            ))}
+            {TOUR_STEPS.map((_,i)=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:i===step?T.accent:T.border}}/>)}
           </div>
           <div style={{display:"flex",gap:8}}>
-            {step>0&&<button onClick={prev} style={{padding:"8px 16px",fontSize:"13px",border:"1px solid #E0DFDB",borderRadius:4,background:"transparent",color:"#1A1A1A",cursor:"pointer"}}>← Back</button>}
-            <button onClick={next} style={{padding:"8px 20px",fontSize:"13px",border:"none",borderRadius:4,background:"#003366",color:"#fff",fontWeight:600,cursor:"pointer"}}>
+            {step>0&&<button onClick={prev} style={{padding:"8px 16px",fontSize:"13px",border:`1px solid ${T.border}`,borderRadius:4,background:"transparent",color:T.ink,cursor:"pointer"}}>← Back</button>}
+            <button onClick={next} style={{padding:"8px 20px",fontSize:"13px",border:"none",borderRadius:4,background:T.accent,color:"#fff",fontWeight:600,cursor:"pointer"}}>
               {step===TOUR_STEPS.length-1?"Got it ✓":"Next →"}
             </button>
           </div>
@@ -290,14 +215,11 @@ const Tour = ({ onDone }) => {
     </>
   );
 
-  // Desktop: floating tooltip
   return (
     <>
       <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.25)",zIndex:999}} onClick={onDone}/>
       {pos&&(
-        <div style={{position:"absolute",top:pos.top,left:Math.min(pos.left, window.innerWidth-280),
-          width:260,background:"#003366",color:"#fff",borderRadius:8,padding:"14px 16px",
-          zIndex:1000,fontFamily:"Inter,sans-serif",boxSizing:"border-box"}}>
+        <div style={{position:"absolute",top:pos.top,left:Math.min(pos.left,window.innerWidth-280),width:260,background:T.accent,color:"#fff",borderRadius:8,padding:"14px 16px",zIndex:1000,fontFamily:T.sans,boxSizing:"border-box"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
             <span style={{fontSize:"13px",fontWeight:700}}>{curr.title}</span>
             <button onClick={onDone} style={{background:"none",border:"none",color:"rgba(255,255,255,0.6)",fontSize:14,cursor:"pointer",padding:0,marginLeft:8}}>✕</button>
@@ -305,9 +227,7 @@ const Tour = ({ onDone }) => {
           <p style={{margin:"0 0 14px",fontSize:"12px",lineHeight:1.6,color:"rgba(255,255,255,0.85)"}}>{curr.body}</p>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
             <div style={{display:"flex",gap:4}}>
-              {TOUR_STEPS.map((_,i)=>(
-                <div key={i} style={{width:5,height:5,borderRadius:"50%",background:i===step?"#fff":"rgba(255,255,255,0.35)"}}/>
-              ))}
+              {TOUR_STEPS.map((_,i)=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:i===step?"#fff":"rgba(255,255,255,0.35)"}}/>)}
             </div>
             <div style={{display:"flex",gap:6}}>
               {step>0&&<button onClick={prev} style={{padding:"4px 10px",fontSize:"11px",border:"1px solid rgba(255,255,255,0.3)",borderRadius:3,background:"transparent",color:"#fff",cursor:"pointer"}}>← Back</button>}
@@ -316,45 +236,37 @@ const Tour = ({ onDone }) => {
               </button>
             </div>
           </div>
-          <div style={{position:"absolute",top:-6,left:16,width:0,height:0,
-            borderLeft:"6px solid transparent",borderRight:"6px solid transparent",borderBottom:"6px solid #003366"}}/>
+          <div style={{position:"absolute",top:-6,left:16,width:0,height:0,borderLeft:"6px solid transparent",borderRight:"6px solid transparent",borderBottom:`6px solid ${T.accent}`}}/>
         </div>
       )}
     </>
   );
 };
 
-// ─── Uncontrolled note textarea ───────────────────────────────────────────────
-  const ref = useRef(null);
-  const [show, setShow] = useState(false);
-  const [q, setQ] = useState("");
-  const [dropPos, setDropPos] = useState(0);
+// ─── Note Textarea ────────────────────────────────────────────────────────────
+const NoteTextarea = ({onSubmit,onCancel,loading,error,projectName,meName,members}) => {
+  const ref=useRef(null);
+  const [show,setShow]=useState(false);
+  const [q,setQ]=useState("");
+  const [dropPos,setDropPos]=useState(0);
+  const all=useMemo(()=>[{id:"me",name:meName,isSelf:true},...members.map(m=>({...m,isSelf:false}))],[meName,members]);
+  const filtered=all.filter(m=>m.name.toLowerCase().includes(q.toLowerCase()));
 
-  const all = useMemo(() => [
-    {id:"me",name:meName,isSelf:true},
-    ...members.map(m=>({...m,isSelf:false}))
-  ], [meName, members]);
-
-  const filtered = all.filter(m=>m.name.toLowerCase().includes(q.toLowerCase()));
-
-  const handleChange = e => {
-    const val=e.target.value, cur=e.target.selectionStart, before=val.slice(0,cur);
+  const handleChange=e=>{
+    const val=e.target.value,cur=e.target.selectionStart,before=val.slice(0,cur);
     const match=before.match(/@([\w][\w ]*)$/);
-    if(match){setQ(match[1]);setShow(true);setDropPos(cur-match[0].length);}
-    else setShow(false);
+    if(match){setQ(match[1]);setShow(true);setDropPos(cur-match[0].length);}else setShow(false);
   };
-
-  const insert = name => {
-    const ta=ref.current, val=ta.value;
-    const before=val.slice(0,dropPos), rest=val.slice(dropPos).replace(/^@[\w ]*/,"");
+  const insert=name=>{
+    const ta=ref.current,val=ta.value;
+    const before=val.slice(0,dropPos),rest=val.slice(dropPos).replace(/^@[\w ]*/,"");
     ta.value=before+`@${name}`+(rest.startsWith(" ")?rest:" "+rest);
-    setShow(false); ta.focus();
+    setShow(false);ta.focus();
   };
-
-  const loadExample = key => {
-    ref.current.value = key==="meetingNotes"
-      ? `Product Planning - Jan 15\nAttendees: Sarah (PM), Mike (Eng), Alex\n- Prioritize mobile app\n- Analytics dashboard to Q2\nActions: @${meName} review dashboard spec by Jan 20`
-      : `[00:00] Standup. Sarah - dashboard?\n[00:25] Sarah: Auth done, 80% reporting. Ready Thursday.\n[00:45] Blocker: charts broken dark mode.\n[01:00] Mike: I'll help.\n[01:25] @${meName} to send sprint summary by EOD.`;
+  const loadExample=key=>{
+    ref.current.value=key==="meetingNotes"
+      ?`Product Planning - Jan 15\nAttendees: Sarah (PM), Mike (Eng), Alex\n- Prioritize mobile app\n- Analytics dashboard to Q2\nActions: @${meName} review dashboard spec by Jan 20`
+      :`[00:00] Standup. Sarah - dashboard?\n[00:25] Sarah: Auth done, 80% reporting. Ready Thursday.\n[00:45] Blocker: charts broken dark mode.\n[01:00] Mike: I'll help.\n[01:25] @${meName} to send sprint summary by EOD.`;
   };
 
   return (
@@ -372,13 +284,11 @@ const Tour = ({ onDone }) => {
         ))}
       </div>
       <div style={{position:"relative"}}>
-        <textarea ref={ref} onChange={handleChange} placeholder="Paste raw notes, transcript, or bullets…"
-          style={{...inp,height:180,resize:"vertical",lineHeight:1.65}}/>
+        <textarea ref={ref} onChange={handleChange} placeholder="Paste raw notes, transcript, or bullets…" style={{...inp,height:180,resize:"vertical",lineHeight:1.65}}/>
         {show&&filtered.length>0&&(
           <div style={{position:"absolute",top:"100%",left:0,right:0,background:T.white,border:`1px solid ${T.border}`,borderRadius:2,boxShadow:"0 4px 12px rgba(0,0,0,0.08)",zIndex:20}}>
             {filtered.map(m=>(
-              <div key={m.id} onMouseDown={e=>{e.preventDefault();insert(m.name);}}
-                style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",cursor:"pointer",fontSize:"13px",color:T.ink,borderBottom:`1px solid ${T.border}`}}>
+              <div key={m.id} onMouseDown={e=>{e.preventDefault();insert(m.name);}} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",cursor:"pointer",fontSize:"13px",color:T.ink,borderBottom:`1px solid ${T.border}`}}>
                 <Av name={m.name} size={20} isSelf={m.isSelf}/>{m.name}{m.isSelf&&" (you)"}
               </div>
             ))}
@@ -394,6 +304,7 @@ const Tour = ({ onDone }) => {
   );
 };
 
+// ─── Todo Item ────────────────────────────────────────────────────────────────
 const TodoItem = ({todo,projects,onToggle,onDelete,onProjectNav}) => {
   const proj=todo.projectId?projects.find(p=>p.id===todo.projectId):null;
   const projIdx=proj?projects.findIndex(p=>p.id===todo.projectId):-1;
@@ -414,91 +325,80 @@ const TodoItem = ({todo,projects,onToggle,onDelete,onProjectNav}) => {
   );
 };
 
-// ─── Main App ─────────────────────────────────────────────────────────────────
+// ─── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [userId, setUserId] = useState(null);
-  const [data, setData] = useState(null);
-  const [view, setView] = useState("home");
-  const [activeIdx, setActiveIdx] = useState(null);
-  const [activeMemberId, setActiveMemberId] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [homeLoading, setHomeLoading] = useState(false);
-  const [memberLoading, setMemberLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [expandedNote, setExpandedNote] = useState(null);
-  const [newProjName, setNewProjName] = useState("");
-  const [newMemberName, setNewMemberName] = useState("");
-  const [newMemberRole, setNewMemberRole] = useState("");
-  const [meName, setMeName] = useState("");
-  const [notes, setNotes] = useState("");
-  const [taggedSelf, setTaggedSelf] = useState(false);
-  const [taggedMembers, setTaggedMembers] = useState([]);
-  const [questions, setQuestions] = useState([]);
-  const [answers, setAnswers] = useState({});
-  const [notePhase, setNotePhase] = useState("input");
-  const [newTodoText, setNewTodoText] = useState("");
-  const [newTodoDue, setNewTodoDue] = useState("");
-  const [todoFilter, setTodoFilter] = useState("pending");
-
-  const [showTour, setShowTour] = useState(false);
+  const [userId,setUserId]=useState(null);
+  const [data,setData]=useState(null);
+  const [showTour,setShowTour]=useState(false);
+  const [view,setView]=useState("home");
+  const [activeIdx,setActiveIdx]=useState(null);
+  const [activeMemberId,setActiveMemberId]=useState(null);
+  const [loading,setLoading]=useState(false);
+  const [homeLoading,setHomeLoading]=useState(false);
+  const [memberLoading,setMemberLoading]=useState(false);
+  const [error,setError]=useState("");
+  const [expandedNote,setExpandedNote]=useState(null);
+  const [newProjName,setNewProjName]=useState("");
+  const [newMemberName,setNewMemberName]=useState("");
+  const [newMemberRole,setNewMemberRole]=useState("");
+  const [meName,setMeName]=useState("");
+  const [notes,setNotes]=useState("");
+  const [taggedSelf,setTaggedSelf]=useState(false);
+  const [taggedMembers,setTaggedMembers]=useState([]);
+  const [questions,setQuestions]=useState([]);
+  const [answers,setAnswers]=useState({});
+  const [notePhase,setNotePhase]=useState("input");
+  const [newTodoText,setNewTodoText]=useState("");
+  const [newTodoDue,setNewTodoDue]=useState("");
+  const [todoFilter,setTodoFilter]=useState("pending");
 
   useEffect(()=>{
-    db.getUser().then(user => {
-      if(user) {
+    db.getUser().then(user=>{
+      if(user){
         setUserId(user.id);
-        db.loadAll(user.id).then(async d => {
+        db.loadAll(user.id).then(d=>{
           setData(d);
           if(d.me) setMeName(d.me);
-          const tourDone = await db.getTourDone(user.id);
-          if(!tourDone && d.me) setShowTour(true);
+          if(d.me&&!d.tourDone) setShowTour(true);
         });
       }
     });
   },[]);
 
-  const projects = data?.projects||[];
-  const members = data?.members||[];
-  const todos = data?.todos||[];
-  const activeProject = activeIdx!==null?projects[activeIdx]:null;
-  const activeMember = activeMemberId?members.find(m=>m.id===activeMemberId):null;
+  const projects=data?.projects||[];
+  const members=data?.members||[];
+  const todos=data?.todos||[];
+  const activeProject=activeIdx!==null?projects[activeIdx]:null;
+  const activeMember=activeMemberId?members.find(m=>m.id===activeMemberId):null;
 
-  const reload = async () => {
-    if(!userId) return;
-    const d = await db.loadAll(userId);
-    setData(d);
-    return d;
-  };
+  const reload=async()=>{if(!userId)return;const d=await db.loadAll(userId);setData(d);return d;};
+  const meInNotes=text=>data?.me&&text.toLowerCase().includes(data.me.toLowerCase());
+  const extractMentions=text=>members.filter(m=>text.toLowerCase().includes(m.name.toLowerCase())||text.includes(`@${m.name}`));
 
-  const meInNotes = text => data?.me&&text.toLowerCase().includes(data.me.toLowerCase());
-  const extractMentions = text => members.filter(m=>text.toLowerCase().includes(m.name.toLowerCase())||text.includes(`@${m.name}`));
-
-  const saveMe = async () => {
-    if(!meName.trim()||!userId) return;
-    await db.setName(userId, meName.trim());
+  const saveMe=async()=>{
+    if(!meName.trim()||!userId)return;
+    await db.setName(userId,meName.trim());
     setData(d=>({...d,me:meName.trim()}));
     setShowTour(true);
   };
 
-  const handleTourDone = async () => {
+  const handleTourDone=async()=>{
     setShowTour(false);
     if(userId) await db.completeTour(userId);
   };
 
-  const signOut = async () => {
-    await supabase.auth.signOut();
-    window.location.reload();
-  };
+  const signOut=async()=>{await supabase.auth.signOut();window.location.reload();};
 
-  const generateHomeSummary = async () => {
-    if(!userId) return;
+  const generateHomeSummary=async()=>{
+    if(!userId)return;
     setHomeLoading(true);
-    try {
-      const d = data;
+    try{
+      const d=data;
       const myTodos=(d.todos||[]).filter(t=>t.done||isThisWeek(t.dueDate)||isThisWeek(t.createdAt));
       const recentNotes=[];
-      for(const p of d.projects) for(const n of p.notes) if(isThisWeek(n.date)||meInNotes(n.raw)) recentNotes.push({project:p.name,date:n.date,summary:n.summary});
+      for(const p of d.projects)for(const n of p.notes)if(isThisWeek(n.date)||meInNotes(n.raw))recentNotes.push({project:p.name,date:n.date,summary:n.summary});
       const nextTodos=(d.todos||[]).filter(t=>!t.done&&(isNextWeek(t.dueDate)||!t.dueDate)).slice(0,8);
-      const prompt=`Generate a weekly executive briefing for ${d.me||"the user"}.
+      const summary=await claude(`Generate a weekly executive briefing for ${d.me||"the user"}.
 This week's meetings:\n${recentNotes.length>0?recentNotes.map(n=>`[${n.project}] ${fmt(n.date)}: ${n.summary.slice(0,250)}`).join("\n"):"None."}
 My tasks:\n${myTodos.length>0?myTodos.map(t=>`[${t.done?"DONE":"PENDING"}] ${t.text}`).join("\n"):"None."}
 Next week:\n${nextTodos.length>0?nextTodos.map(t=>`- ${t.text}`).join("\n"):"Nothing."}
@@ -508,110 +408,91 @@ Write:
 ## Open Items
 Bullet list.
 ## Next Week
-3-5 actions.`;
-      const summary=await claude(prompt,700);
-      await db.upsertHomeSummary(userId, summary);
+3-5 actions.`,700);
+      await db.upsertHomeSummary(userId,summary);
       await reload();
-    }catch{}
-    finally{setHomeLoading(false);}
+    }catch{}finally{setHomeLoading(false);}
   };
 
-  const addTodo = async () => {
-    if(!newTodoText.trim()||!userId) return;
-    const t = await db.createTodo(userId, {
-      text:newTodoText.trim(), dueDate:newTodoDue||null,
-      projectId:activeIdx!==null?activeProject.id:null, source:'manual'
-    });
+  const addTodo=async()=>{
+    if(!newTodoText.trim()||!userId)return;
+    const t=await db.createTodo(userId,{text:newTodoText.trim(),dueDate:newTodoDue||null,projectId:activeIdx!==null?activeProject.id:null,source:'manual'});
     setData(d=>({...d,todos:[...d.todos,t]}));
-    setNewTodoText(""); setNewTodoDue("");
+    setNewTodoText("");setNewTodoDue("");
   };
 
-  const extractTodosFromNote = async (summary, projectId) => {
-    if(!data?.me||!userId) return [];
+  const extractTodosFromNote=async(summary,projectId)=>{
+    if(!data?.me||!userId)return[];
     try{
       const raw=await claude(`Extract action items for "${data.me}" from this summary. Return ONLY a JSON array of strings. If none, return [].\n${summary}`,300);
       const items=parseJsonSafe(raw);
-      if(!Array.isArray(items)||items.length===0) return [];
+      if(!Array.isArray(items)||items.length===0)return[];
       const existing=new Set(todos.map(t=>t.text.toLowerCase()));
       const fresh=items.filter(t=>!existing.has(t.toLowerCase()));
-      const created=await Promise.all(fresh.map(text=>db.createTodo(userId,{text,projectId,source:'ai'})));
-      return created;
-    }catch{return [];}
+      return await Promise.all(fresh.map(text=>db.createTodo(userId,{text,projectId,source:'ai'})));
+    }catch{return[];}
   };
 
-  const toggleTodo = async id => {
-    const todo=todos.find(t=>t.id===id); if(!todo) return;
+  const toggleTodo=async id=>{
+    const todo=todos.find(t=>t.id===id);if(!todo)return;
     const nowDone=!todo.done;
-    await db.toggleTodo(id, nowDone);
+    await db.toggleTodo(id,nowDone);
     setData(d=>({...d,todos:d.todos.map(t=>t.id===id?{...t,done:nowDone}:t)}));
     if(nowDone&&todo.projectId){
       const pIdx=projects.findIndex(p=>p.id===todo.projectId);
       if(pIdx>=0&&projects[pIdx].notes.length>0){
-        try{
-          const s=await claude(`Latest status for "${projects[pIdx].name}". Note: "${todo.text}" just completed.\n${projects[pIdx].notes.map((n,i)=>`Meeting ${i+1}:\n${n.summary}`).join("\n\n")}`,700);
-          await db.updateProjectStatus(todo.projectId, s);
-          await reload();
-        }catch{}
+        try{const s=await claude(`Latest status for "${projects[pIdx].name}". Note: "${todo.text}" just completed.\n${projects[pIdx].notes.map((n,i)=>`Meeting ${i+1}:\n${n.summary}`).join("\n\n")}`,700);await db.updateProjectStatus(todo.projectId,s);await reload();}catch{}
       }
     }
   };
 
-  const deleteTodo = async id => {
-    await db.deleteTodo(id);
-    setData(d=>({...d,todos:d.todos.filter(t=>t.id!==id)}));
-  };
+  const deleteTodo=async id=>{await db.deleteTodo(id);setData(d=>({...d,todos:d.todos.filter(t=>t.id!==id)}));};
 
-  const addMember = async () => {
-    if(!newMemberName.trim()||!userId) return;
+  const addMember=async()=>{
+    if(!newMemberName.trim()||!userId)return;
     const m=await db.createMember(userId,{name:newMemberName.trim(),role:newMemberRole.trim()});
     setData(d=>({...d,members:[...d.members,m]}));
-    setNewMemberName(""); setNewMemberRole("");
+    setNewMemberName("");setNewMemberRole("");
   };
 
-  const deleteMember = async id => {
-    await db.deleteMember(id);
-    setData(d=>({...d,members:d.members.filter(m=>m.id!==id)}));
-  };
+  const deleteMember=async id=>{await db.deleteMember(id);setData(d=>({...d,members:d.members.filter(m=>m.id!==id)}));};
 
-  const generateMemberSummary = async memberId => {
+  const generateMemberSummary=async memberId=>{
     setMemberLoading(true);
     try{
-      const member=members.find(m=>m.id===memberId); if(!member) return;
+      const member=members.find(m=>m.id===memberId);if(!member)return;
       const mentions=[];
-      for(const p of projects) for(const n of p.notes) if(n.raw.toLowerCase().includes(member.name.toLowerCase())||n.taggedMembers?.includes(member.id)) mentions.push({project:p.name,date:n.date,summary:n.summary});
+      for(const p of projects)for(const n of p.notes)if(n.raw.toLowerCase().includes(member.name.toLowerCase())||n.taggedMembers?.includes(member.id))mentions.push({project:p.name,date:n.date,summary:n.summary});
       const summary=mentions.length===0?"No notes mention this person yet.":await claude(`Summarise ${member.name}'s activity.\n\n${mentions.map(m=>`[${m.project}] ${fmt(m.date)}:\n${m.summary}`).join("\n\n---\n\n")}`,900);
-      await db.updateMemberSummary(memberId, summary);
+      await db.updateMemberSummary(memberId,summary);
       await reload();
-    }catch{}
-    finally{setMemberLoading(false);}
+    }catch{}finally{setMemberLoading(false);}
   };
 
-  const createProject = async () => {
-    if(!newProjName.trim()||!userId) return;
-    const p=await db.createProject(userId, newProjName.trim());
+  const createProject=async()=>{
+    if(!newProjName.trim()||!userId)return;
+    const p=await db.createProject(userId,newProjName.trim());
     setData(d=>({...d,projects:[...d.projects,p]}));
     setActiveIdx(data.projects.length);
-    setNewProjName(""); setView("project");
+    setNewProjName("");setView("project");
   };
 
-  const buildPriorCtx = proj => {
-    if(!proj||proj.notes.length===0) return "";
+  const buildPriorCtx=proj=>{
+    if(!proj||proj.notes.length===0)return"";
     const parts=[];
-    if(proj.status) parts.push(`Status:\n${proj.status}`);
+    if(proj.status)parts.push(`Status:\n${proj.status}`);
     proj.notes.slice(-3).forEach(n=>parts.push(`[${fmt(n.date)}]\n${n.summary}`));
     return parts.join("\n\n");
   };
 
-  const analyseNote = async notesVal => {
+  const analyseNote=async notesVal=>{
     if(!notesVal.trim()){setError("Please enter notes.");return;}
-    setNotes(notesVal); setError(""); setLoading(true);
-    const mentioned=extractMentions(notesVal);
-    const selfTagged=meInNotes(notesVal);
-    setTaggedMembers(mentioned); setTaggedSelf(selfTagged);
+    setNotes(notesVal);setError("");setLoading(true);
+    const mentioned=extractMentions(notesVal),selfTagged=meInNotes(notesVal);
+    setTaggedMembers(mentioned);setTaggedSelf(selfTagged);
     try{
       const prior=buildPriorCtx(activeProject);
-      const prompt=`Review new meeting notes.${prior?` Existing context:\n${prior}\n\n`:" "}Identify up to 3 things STILL unclear. Return [] if clear. Respond with ONLY a valid JSON array of strings.\n\nNotes:\n${notesVal}`;
-      const raw=await claude(prompt,400);
+      const raw=await claude(`Review new meeting notes.${prior?` Existing context:\n${prior}\n\n`:" "}Identify up to 3 things STILL unclear. Return [] if clear. ONLY a valid JSON array of strings.\n\nNotes:\n${notesVal}`,400);
       const qs=parseJsonSafe(raw);
       if(!qs||!Array.isArray(qs)||qs.length===0){await finaliseNote(notesVal,{},mentioned,selfTagged);}
       else{setQuestions(qs);setAnswers(Object.fromEntries(qs.map((_,i)=>[i,""])));setNotePhase("clarifying");}
@@ -619,71 +500,41 @@ Bullet list.
     finally{setLoading(false);}
   };
 
-  const finaliseNote = async (notesVal,ans,mentionedOvr,selfOvr) => {
-    setLoading(true); setError("");
-    const n=notesVal||notes;
-    const mentioned=mentionedOvr||taggedMembers;
-    const selfMentioned=selfOvr??taggedSelf;
+  const finaliseNote=async(notesVal,ans,mentionedOvr,selfOvr)=>{
+    setLoading(true);setError("");
+    const n=notesVal||notes,mentioned=mentionedOvr||taggedMembers,selfMentioned=selfOvr??taggedSelf;
     try{
       const clarifs=questions.length>0?"\n\nClarifications:\n"+questions.map((q,i)=>ans[i]?`Q: ${q}\nA: ${ans[i]}`:null).filter(Boolean).join("\n"):"";
       const summary=await claude(`Convert to structured summary:\n1. Overview\n2. Key decisions\n3. Action items\n4. Discussion\n5. Next steps\nUse markdown.\n\nNotes:\n${n}${clarifs}`,1200);
-
-      const entry=await db.createNote(userId, activeProject.id, {
-        raw:n, summary, selfTagged:selfMentioned,
-        taggedMemberIds:mentioned.map(m=>m.id),
-      });
-
+      await db.createNote(userId,activeProject.id,{raw:n,summary,selfTagged:selfMentioned,taggedMemberIds:mentioned.map(m=>m.id)});
       const d=await reload();
       const proj=d.projects.find(p=>p.id===activeProject.id);
       if(proj){
         const allS=proj.notes.map((n,i)=>`Meeting ${i+1} (${fmt(n.date)}):\n${n.summary}`).join("\n\n");
         const status=await claude(`Latest status for "${proj.name}". Current state, open actions, decisions, blockers, next steps.\n${allS}`,700);
-        await db.updateProjectStatus(proj.id, status);
+        await db.updateProjectStatus(proj.id,status);
       }
-
-      if(selfMentioned) await extractTodosFromNote(summary, activeProject.id);
-
+      if(selfMentioned)await extractTodosFromNote(summary,activeProject.id);
       for(const m of mentioned){
         const allM=[];
-        for(const p of (d.projects||[])){
-          for(const note of p.notes){
-            if(note.raw.toLowerCase().includes(m.name.toLowerCase())||note.taggedMembers?.includes(m.id))
-              allM.push({project:p.name,date:note.date,summary:note.summary});
-          }
-        }
-        if(allM.length>0){
-          try{
-            const ms=await claude(`Summarise ${m.name}'s activity.\n\n${allM.map(a=>`[${a.project}] ${fmt(a.date)}:\n${a.summary}`).join("\n\n---\n\n")}`,700);
-            await db.updateMemberSummary(m.id, ms);
-          }catch{}
-        }
+        for(const p of(d.projects||[])){for(const note of p.notes){if(note.raw.toLowerCase().includes(m.name.toLowerCase())||note.taggedMembers?.includes(m.id))allM.push({project:p.name,date:note.date,summary:note.summary});}}
+        if(allM.length>0){try{const ms=await claude(`Summarise ${m.name}'s activity.\n\n${allM.map(a=>`[${a.project}] ${fmt(a.date)}:\n${a.summary}`).join("\n\n---\n\n")}`,700);await db.updateMemberSummary(m.id,ms);}catch{}}
       }
-
       await reload();
-      setNotes(""); setQuestions([]); setAnswers({}); setTaggedMembers([]); setTaggedSelf(false); setNotePhase("input");
+      setNotes("");setQuestions([]);setAnswers({});setTaggedMembers([]);setTaggedSelf(false);setNotePhase("input");
       setView("project");
-    }catch(e){setError("Failed to save. Please try again."); console.error(e);}
+    }catch(e){setError("Failed to save. Please try again.");console.error(e);}
     finally{setLoading(false);}
   };
 
-  const deleteNote = async noteId => {
+  const deleteNote=async noteId=>{
     await db.deleteNote(noteId);
     const d=await reload();
     const proj=d.projects.find(p=>p.id===activeProject.id);
-    if(proj&&proj.notes.length>0){
-      try{
-        const status=await claude(`Latest status for "${proj.name}":\n${proj.notes.map((n,i)=>`Meeting ${i+1}:\n${n.summary}`).join("\n\n")}`,700);
-        await db.updateProjectStatus(proj.id, status);
-        await reload();
-      }catch{}
-    }
+    if(proj&&proj.notes.length>0){try{const status=await claude(`Latest status for "${proj.name}":\n${proj.notes.map((n,i)=>`Meeting ${i+1}:\n${n.summary}`).join("\n\n")}`,700);await db.updateProjectStatus(proj.id,status);await reload();}catch{}}
   };
 
-  const deleteProject = async idx => {
-    await db.deleteProject(projects[idx].id);
-    await reload();
-    setView("home"); setActiveIdx(null);
-  };
+  const deleteProject=async idx=>{await db.deleteProject(projects[idx].id);await reload();setView("home");setActiveIdx(null);};
 
   const pendingTodos=todos.filter(t=>!t.done);
   const doneTodos=todos.filter(t=>t.done);
@@ -692,9 +543,9 @@ Bullet list.
   const upcomingTodos=pendingTodos.filter(t=>!isThisWeek(t.dueDate)&&!isOverdue(t.dueDate)&&t.dueDate);
   const undatedTodos=pendingTodos.filter(t=>!t.dueDate&&!isThisWeek(t.createdAt));
 
-  const Nav = () => (
+  const Nav=()=>(
     <div style={{marginBottom:24,paddingBottom:14,borderBottom:`1px solid ${T.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
-      <div style={{display:"flex",gap:0,flexWrap:"wrap"}} id="tour-nav">
+      <div id="tour-nav" style={{display:"flex",gap:0,flexWrap:"wrap"}}>
         {[["home","Overview"],["todos","My Tasks"],["team","Team"]].map(([v,label])=>(
           <button key={v} onClick={()=>setView(v)} style={{padding:"5px 12px",fontSize:"13px",fontWeight:view===v?700:400,color:view===v?T.accent:T.mid,background:"transparent",border:"none",borderBottom:view===v?`2px solid ${T.accent}`:"2px solid transparent",cursor:"pointer",fontFamily:T.sans}}>
             {label}
@@ -709,20 +560,14 @@ Bullet list.
     </div>
   );
 
-  const SectionTitle = ({children,sub}) => (
+  const SectionTitle=({children,sub})=>(
     <div style={{marginBottom:14}}>
       <h2 style={{margin:0,fontSize:"18px",fontWeight:700,fontFamily:T.serif,color:T.ink,letterSpacing:"-0.01em"}}>{children}</h2>
       {sub&&<p style={{margin:"2px 0 0",fontSize:"12px",color:T.muted}}>{sub}</p>}
     </div>
   );
 
-  if(!data) return (
-    <Shell>
-      <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"60vh"}}>
-        <p style={{color:T.muted}}>Loading your workspace…</p>
-      </div>
-    </Shell>
-  );
+  if(!data) return <Shell><div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"60vh"}}><p style={{color:T.muted}}>Loading your workspace…</p></div></Shell>;
 
   if(!data.me) return (
     <Shell maxW={400}>
@@ -742,7 +587,7 @@ Bullet list.
     <Shell>
       {showTour&&<Tour onDone={handleTourDone}/>}
       <Nav/>
-      <Card accent={T.accent} style={{marginBottom:14}} >
+      <Card accent={T.accent} style={{marginBottom:14}}>
         <div id="tour-briefing" style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,gap:8,flexWrap:"wrap"}}>
           <div>
             <h2 style={{margin:0,fontFamily:T.serif,fontSize:"16px",fontWeight:700}}>Weekly Briefing</h2>
@@ -863,8 +708,8 @@ Bullet list.
       </Card>
       {(()=>{
         const mentions=[];
-        for(const p of projects) for(const n of p.notes) if(n.taggedMembers?.includes(activeMember.id)||n.raw.toLowerCase().includes(activeMember.name.toLowerCase())) mentions.push({...n,projectName:p.name,projIdx:projects.findIndex(pp=>pp.name===p.name)});
-        if(!mentions.length) return <Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No notes mention this person yet.</p></Card>;
+        for(const p of projects)for(const n of p.notes)if(n.taggedMembers?.includes(activeMember.id)||n.raw.toLowerCase().includes(activeMember.name.toLowerCase()))mentions.push({...n,projectName:p.name,projIdx:projects.findIndex(pp=>pp.name===p.name)});
+        if(!mentions.length)return<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No notes mention this person yet.</p></Card>;
         return(<>{[...mentions].reverse().map(n=>(
           <Card key={n.id}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5,flexWrap:"wrap",gap:6}}>
@@ -957,15 +802,7 @@ Bullet list.
       <Nav/>
       <button onClick={()=>{setView("project");setNotePhase("input");}} style={{fontSize:"12px",color:T.mid,background:"none",border:"none",cursor:"pointer",padding:"0 0 16px",fontFamily:T.sans}}>← {activeProject?.name}</button>
       {notePhase==="input"&&(
-        <NoteTextarea
-          onSubmit={analyseNote}
-          onCancel={()=>{setView("project");setNotePhase("input");}}
-          loading={loading}
-          error={error}
-          projectName={activeProject?.name}
-          meName={data.me||"me"}
-          members={members}
-        />
+        <NoteTextarea onSubmit={analyseNote} onCancel={()=>{setView("project");setNotePhase("input");}} loading={loading} error={error} projectName={activeProject?.name} meName={data.me||"me"} members={members}/>
       )}
       {notePhase==="clarifying"&&(
         <Card>
