@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
+import { supabase } from "./AuthWrapper.jsx";
 
 const T = {
   bg: "#F5F4F0", white: "#FFFFFF", ink: "#1A1A1A", mid: "#6B6B6B",
@@ -19,10 +20,6 @@ const isThisWeek = iso => { const d=new Date(iso),now=new Date(),s=new Date(now)
 const isNextWeek = iso => { const d=new Date(iso),now=new Date(),s=new Date(now); s.setDate(now.getDate()-now.getDay()+8); const e=new Date(s); e.setDate(s.getDate()+6); return d>=s&&d<=e; };
 const isOverdue = iso => iso && new Date(iso)<new Date() && !isThisWeek(iso);
 
-const SK = "debrief_v1";
-const loadData = () => { try { const r=localStorage.getItem(SK); return r?JSON.parse(r):{projects:[],members:[],todos:[],me:null,homeWeeklySummary:null,homeWeeklySummaryDate:null}; } catch { return {projects:[],members:[],todos:[],me:null,homeWeeklySummary:null,homeWeeklySummaryDate:null}; } };
-const saveData = d => { try { localStorage.setItem(SK,JSON.stringify(d)); } catch {} };
-
 const claude = async (prompt, maxTokens=1500) => {
   const r = await fetch("/api/claude", {
     method: "POST",
@@ -38,6 +35,118 @@ const parseJsonSafe = raw => {
   catch { const m=raw.match(/\[[\s\S]*\]/); if(m){try{return JSON.parse(m[0]);}catch{}} return null; }
 };
 
+// ─── Supabase data functions ──────────────────────────────────────────────────
+const db = {
+  async getUser() {
+    const { data: { user } } = await supabase.auth.getUser();
+    return user;
+  },
+
+  async loadAll(userId) {
+    const [
+      { data: projects },
+      { data: notes },
+      { data: members },
+      { data: noteMembers },
+      { data: todos },
+      { data: homeSummary },
+      { data: profile },
+    ] = await Promise.all([
+      supabase.from('projects').select('*').eq('user_id', userId).order('created_at'),
+      supabase.from('notes').select('*').eq('user_id', userId).order('date'),
+      supabase.from('members').select('*').eq('user_id', userId).order('created_at'),
+      supabase.from('note_members').select('*'),
+      supabase.from('todos').select('*').eq('user_id', userId).order('created_at'),
+      supabase.from('home_summaries').select('*').eq('user_id', userId).single(),
+      supabase.from('profiles').select('*').eq('id', userId).single(),
+    ]);
+
+    const projectsWithNotes = (projects||[]).map(p => ({
+      ...p,
+      statusUpdated: p.status_updated_at,
+      notes: (notes||[]).filter(n=>n.project_id===p.id).map(n => ({
+        ...n,
+        selfTagged: n.self_tagged,
+        taggedMembers: (noteMembers||[]).filter(nm=>nm.note_id===n.id).map(nm=>nm.member_id),
+      })),
+    }));
+
+    return {
+      projects: projectsWithNotes,
+      members: members||[],
+      todos: (todos||[]).map(t=>({...t, dueDate:t.due_date, projectId:t.project_id, doneAt:t.done_at})),
+      me: profile?.name || null,
+      homeWeeklySummary: homeSummary?.summary || null,
+      homeWeeklySummaryDate: homeSummary?.updated_at || null,
+    };
+  },
+
+  async createProject(userId, name) {
+    const { data } = await supabase.from('projects').insert({ user_id:userId, name }).select().single();
+    return { ...data, notes:[], status:null, statusUpdated:null };
+  },
+
+  async updateProjectStatus(projectId, status) {
+    await supabase.from('projects').update({ status, status_updated_at:new Date().toISOString() }).eq('id', projectId);
+  },
+
+  async deleteProject(projectId) {
+    await supabase.from('projects').delete().eq('id', projectId);
+  },
+
+  async createNote(userId, projectId, { raw, summary, selfTagged, taggedMemberIds }) {
+    const { data: note } = await supabase.from('notes').insert({
+      user_id:userId, project_id:projectId, raw, summary,
+      self_tagged:selfTagged, date:new Date().toISOString(),
+    }).select().single();
+    if(taggedMemberIds?.length > 0) {
+      await supabase.from('note_members').insert(taggedMemberIds.map(member_id=>({ note_id:note.id, member_id })));
+    }
+    return { ...note, selfTagged:note.self_tagged, taggedMembers:taggedMemberIds||[] };
+  },
+
+  async deleteNote(noteId) {
+    await supabase.from('notes').delete().eq('id', noteId);
+  },
+
+  async createMember(userId, { name, role }) {
+    const { data } = await supabase.from('members').insert({ user_id:userId, name, role }).select().single();
+    return data;
+  },
+
+  async updateMemberSummary(memberId, summary) {
+    await supabase.from('members').update({ summary, summary_updated_at:new Date().toISOString() }).eq('id', memberId);
+  },
+
+  async deleteMember(memberId) {
+    await supabase.from('members').delete().eq('id', memberId);
+  },
+
+  async createTodo(userId, { text, dueDate, projectId, source='manual' }) {
+    const { data } = await supabase.from('todos').insert({
+      user_id:userId, text, due_date:dueDate||null, project_id:projectId||null, source,
+    }).select().single();
+    return { ...data, dueDate:data.due_date, projectId:data.project_id };
+  },
+
+  async toggleTodo(todoId, done) {
+    await supabase.from('todos').update({ done, done_at:done?new Date().toISOString():null }).eq('id', todoId);
+  },
+
+  async deleteTodo(todoId) {
+    await supabase.from('todos').delete().eq('id', todoId);
+  },
+
+  async upsertHomeSummary(userId, summary) {
+    await supabase.from('home_summaries').upsert({ user_id:userId, summary, updated_at:new Date().toISOString() });
+  },
+
+  async setName(userId, name) {
+    await supabase.from('profiles').upsert({ id:userId, name });
+  },
+};
+
+// ─── UI primitives ────────────────────────────────────────────────────────────
 const MD = ({ content, small }) => {
   const fs = small?"13px":"14px";
   const css = `.md h1{font-size:17px;font-weight:700;margin:12px 0 5px;font-family:${T.serif};color:${T.ink}}.md h2{font-size:15px;font-weight:700;margin:10px 0 4px;font-family:${T.serif};color:${T.ink}}.md h3{font-size:${fs};font-weight:600;margin:8px 0 3px;color:${T.ink}}.md strong{font-weight:600}.md ul,.md ol{margin:4px 0;padding-left:18px}.md li{margin:2px 0;font-size:${fs}}.md ul li{list-style-type:disc}.md ol li{list-style-type:decimal}.md p{margin:4px 0;font-size:${fs};line-height:1.6}`;
@@ -95,7 +204,6 @@ const GroupLabel = ({children,color=T.mid}) => (
   <p style={{margin:"14px 0 6px",fontSize:"10px",fontWeight:700,letterSpacing:"0.09em",textTransform:"uppercase",color}}>{children}</p>
 );
 
-// Uncontrolled textarea — never loses focus
 const NoteTextarea = ({ onSubmit, onCancel, loading, error, projectName, meName, members }) => {
   const ref = useRef(null);
   const [show, setShow] = useState(false);
@@ -110,22 +218,17 @@ const NoteTextarea = ({ onSubmit, onCancel, loading, error, projectName, meName,
   const filtered = all.filter(m=>m.name.toLowerCase().includes(q.toLowerCase()));
 
   const handleChange = e => {
-    const val = e.target.value;
-    const cur = e.target.selectionStart;
-    const before = val.slice(0,cur);
-    const match = before.match(/@([\w][\w ]*)$/);
+    const val=e.target.value, cur=e.target.selectionStart, before=val.slice(0,cur);
+    const match=before.match(/@([\w][\w ]*)$/);
     if(match){setQ(match[1]);setShow(true);setDropPos(cur-match[0].length);}
     else setShow(false);
   };
 
   const insert = name => {
-    const ta = ref.current;
-    const val = ta.value;
-    const before = val.slice(0,dropPos);
-    const rest = val.slice(dropPos).replace(/^@[\w ]*/,"");
-    ta.value = before+`@${name}`+(rest.startsWith(" ")?rest:" "+rest);
-    setShow(false);
-    ta.focus();
+    const ta=ref.current, val=ta.value;
+    const before=val.slice(0,dropPos), rest=val.slice(dropPos).replace(/^@[\w ]*/,"");
+    ta.value=before+`@${name}`+(rest.startsWith(" ")?rest:" "+rest);
+    setShow(false); ta.focus();
   };
 
   const loadExample = key => {
@@ -151,7 +254,7 @@ const NoteTextarea = ({ onSubmit, onCancel, loading, error, projectName, meName,
       <div style={{position:"relative"}}>
         <textarea ref={ref} onChange={handleChange} placeholder="Paste raw notes, transcript, or bullets…"
           style={{...inp,height:180,resize:"vertical",lineHeight:1.65}}/>
-        {show && filtered.length>0 && (
+        {show&&filtered.length>0&&(
           <div style={{position:"absolute",top:"100%",left:0,right:0,background:T.white,border:`1px solid ${T.border}`,borderRadius:2,boxShadow:"0 4px 12px rgba(0,0,0,0.08)",zIndex:20}}>
             {filtered.map(m=>(
               <div key={m.id} onMouseDown={e=>{e.preventDefault();insert(m.name);}}
@@ -172,9 +275,9 @@ const NoteTextarea = ({ onSubmit, onCancel, loading, error, projectName, meName,
 };
 
 const TodoItem = ({todo,projects,onToggle,onDelete,onProjectNav}) => {
-  const proj = todo.projectId?projects.find(p=>p.id===todo.projectId):null;
-  const projIdx = proj?projects.findIndex(p=>p.id===todo.projectId):-1;
-  const overdue = !todo.done&&isOverdue(todo.dueDate);
+  const proj=todo.projectId?projects.find(p=>p.id===todo.projectId):null;
+  const projIdx=proj?projects.findIndex(p=>p.id===todo.projectId):-1;
+  const overdue=!todo.done&&isOverdue(todo.dueDate);
   return (
     <div style={{display:"flex",alignItems:"flex-start",gap:10,padding:"9px 0",borderBottom:`1px solid ${T.border}`}}>
       <input type="checkbox" checked={!!todo.done} onChange={()=>onToggle(todo.id)} style={{marginTop:3,accentColor:T.accent,cursor:"pointer",flexShrink:0}}/>
@@ -191,7 +294,9 @@ const TodoItem = ({todo,projects,onToggle,onDelete,onProjectNav}) => {
   );
 };
 
+// ─── Main App ─────────────────────────────────────────────────────────────────
 export default function App() {
+  const [userId, setUserId] = useState(null);
   const [data, setData] = useState(null);
   const [view, setView] = useState("home");
   const [activeIdx, setActiveIdx] = useState(null);
@@ -215,23 +320,50 @@ export default function App() {
   const [newTodoDue, setNewTodoDue] = useState("");
   const [todoFilter, setTodoFilter] = useState("pending");
 
-  useEffect(()=>{ const d=loadData(); setData(d); if(d.me) setMeName(d.me); },[]);
+  useEffect(()=>{
+    db.getUser().then(user => {
+      if(user) {
+        setUserId(user.id);
+        db.loadAll(user.id).then(d => {
+          setData(d);
+          if(d.me) setMeName(d.me);
+        });
+      }
+    });
+  },[]);
 
-  const persist = d => { setData(d); saveData(d); };
   const projects = data?.projects||[];
   const members = data?.members||[];
   const todos = data?.todos||[];
   const activeProject = activeIdx!==null?projects[activeIdx]:null;
   const activeMember = activeMemberId?members.find(m=>m.id===activeMemberId):null;
 
+  const reload = async () => {
+    if(!userId) return;
+    const d = await db.loadAll(userId);
+    setData(d);
+    return d;
+  };
+
   const meInNotes = text => data?.me&&text.toLowerCase().includes(data.me.toLowerCase());
   const extractMentions = text => members.filter(m=>text.toLowerCase().includes(m.name.toLowerCase())||text.includes(`@${m.name}`));
 
-  const saveMe = () => { if(!meName.trim()) return; persist({...data,me:meName.trim()}); };
+  const saveMe = async () => {
+    if(!meName.trim()||!userId) return;
+    await db.setName(userId, meName.trim());
+    setData(d=>({...d,me:meName.trim()}));
+  };
 
-  const generateHomeSummary = async d0 => {
-    const d=d0||data; setHomeLoading(true);
+  const signOut = async () => {
+    await supabase.auth.signOut();
+    window.location.reload();
+  };
+
+  const generateHomeSummary = async () => {
+    if(!userId) return;
+    setHomeLoading(true);
     try {
+      const d = data;
       const myTodos=(d.todos||[]).filter(t=>t.done||isThisWeek(t.dueDate)||isThisWeek(t.createdAt));
       const recentNotes=[];
       for(const p of d.projects) for(const n of p.notes) if(isThisWeek(n.date)||meInNotes(n.raw)) recentNotes.push({project:p.name,date:n.date,summary:n.summary});
@@ -248,71 +380,88 @@ Bullet list.
 ## Next Week
 3-5 actions.`;
       const summary=await claude(prompt,700);
-      persist({...d,homeWeeklySummary:summary,homeWeeklySummaryDate:new Date().toISOString()});
-    } catch{}
+      await db.upsertHomeSummary(userId, summary);
+      await reload();
+    }catch{}
     finally{setHomeLoading(false);}
   };
 
-  const addTodo = () => {
-    if(!newTodoText.trim()) return;
-    const t={id:Date.now(),text:newTodoText.trim(),dueDate:newTodoDue||null,done:false,projectId:activeIdx!==null?activeProject.id:null,source:"manual",createdAt:new Date().toISOString()};
-    persist({...data,todos:[...todos,t]});
+  const addTodo = async () => {
+    if(!newTodoText.trim()||!userId) return;
+    const t = await db.createTodo(userId, {
+      text:newTodoText.trim(), dueDate:newTodoDue||null,
+      projectId:activeIdx!==null?activeProject.id:null, source:'manual'
+    });
+    setData(d=>({...d,todos:[...d.todos,t]}));
     setNewTodoText(""); setNewTodoDue("");
   };
 
-  const extractTodosFromNote = async (summary,projectId) => {
-    if(!data?.me) return [];
-    try {
+  const extractTodosFromNote = async (summary, projectId) => {
+    if(!data?.me||!userId) return [];
+    try{
       const raw=await claude(`Extract action items for "${data.me}" from this summary. Return ONLY a JSON array of strings. If none, return [].\n${summary}`,300);
       const items=parseJsonSafe(raw);
       if(!Array.isArray(items)||items.length===0) return [];
       const existing=new Set(todos.map(t=>t.text.toLowerCase()));
-      return items.filter(t=>!existing.has(t.toLowerCase())).map(text=>({id:Date.now()+Math.random(),text,dueDate:null,done:false,projectId,source:"ai",createdAt:new Date().toISOString()}));
-    } catch { return []; }
+      const fresh=items.filter(t=>!existing.has(t.toLowerCase()));
+      const created=await Promise.all(fresh.map(text=>db.createTodo(userId,{text,projectId,source:'ai'})));
+      return created;
+    }catch{return [];}
   };
 
   const toggleTodo = async id => {
     const todo=todos.find(t=>t.id===id); if(!todo) return;
     const nowDone=!todo.done;
-    const updTodos=todos.map(t=>t.id===id?{...t,done:nowDone,doneAt:nowDone?new Date().toISOString():null}:t);
-    let updProjects=[...projects];
+    await db.toggleTodo(id, nowDone);
+    setData(d=>({...d,todos:d.todos.map(t=>t.id===id?{...t,done:nowDone}:t)}));
     if(nowDone&&todo.projectId){
       const pIdx=projects.findIndex(p=>p.id===todo.projectId);
       if(pIdx>=0&&projects[pIdx].notes.length>0){
-        try{const s=await claude(`Latest status for "${projects[pIdx].name}". Note: "${todo.text}" just completed.\n${projects[pIdx].notes.map((n,i)=>`Meeting ${i+1}:\n${n.summary}`).join("\n\n")}`,700);updProjects=updProjects.map((pp,i)=>i===pIdx?{...pp,status:s,statusUpdated:new Date().toISOString()}:pp);}catch{}
+        try{
+          const s=await claude(`Latest status for "${projects[pIdx].name}". Note: "${todo.text}" just completed.\n${projects[pIdx].notes.map((n,i)=>`Meeting ${i+1}:\n${n.summary}`).join("\n\n")}`,700);
+          await db.updateProjectStatus(todo.projectId, s);
+          await reload();
+        }catch{}
       }
     }
-    persist({...data,todos:updTodos,projects:updProjects});
   };
 
-  const deleteTodo = id => persist({...data,todos:todos.filter(t=>t.id!==id)});
+  const deleteTodo = async id => {
+    await db.deleteTodo(id);
+    setData(d=>({...d,todos:d.todos.filter(t=>t.id!==id)}));
+  };
 
-  const addMember = () => {
-    if(!newMemberName.trim()) return;
-    const m={id:Date.now(),name:newMemberName.trim(),role:newMemberRole.trim(),joined:new Date().toISOString(),summary:null,summaryUpdated:null};
-    persist({...data,members:[...members,m]});
+  const addMember = async () => {
+    if(!newMemberName.trim()||!userId) return;
+    const m=await db.createMember(userId,{name:newMemberName.trim(),role:newMemberRole.trim()});
+    setData(d=>({...d,members:[...d.members,m]}));
     setNewMemberName(""); setNewMemberRole("");
   };
-  const deleteMember = id => persist({...data,members:members.filter(m=>m.id!==id)});
+
+  const deleteMember = async id => {
+    await db.deleteMember(id);
+    setData(d=>({...d,members:d.members.filter(m=>m.id!==id)}));
+  };
 
   const generateMemberSummary = async memberId => {
     setMemberLoading(true);
-    try {
+    try{
       const member=members.find(m=>m.id===memberId); if(!member) return;
       const mentions=[];
       for(const p of projects) for(const n of p.notes) if(n.raw.toLowerCase().includes(member.name.toLowerCase())||n.taggedMembers?.includes(member.id)) mentions.push({project:p.name,date:n.date,summary:n.summary});
-      const summary=mentions.length===0?"No notes mention this person yet.":await claude(`Summarise ${member.name}'s activity across projects. Cover: involvement, action items, decisions, blockers, open items.\n\n${mentions.map(m=>`[${m.project}] ${fmt(m.date)}:\n${m.summary}`).join("\n\n---\n\n")}`,900);
-      persist({...data,members:members.map(m=>m.id===memberId?{...m,summary,summaryUpdated:new Date().toISOString()}:m)});
-    } catch{}
+      const summary=mentions.length===0?"No notes mention this person yet.":await claude(`Summarise ${member.name}'s activity.\n\n${mentions.map(m=>`[${m.project}] ${fmt(m.date)}:\n${m.summary}`).join("\n\n---\n\n")}`,900);
+      await db.updateMemberSummary(memberId, summary);
+      await reload();
+    }catch{}
     finally{setMemberLoading(false);}
   };
 
-  const createProject = () => {
-    if(!newProjName.trim()) return;
-    const p={id:Date.now(),name:newProjName.trim(),created:new Date().toISOString(),notes:[],status:null,statusUpdated:null};
-    const updated={...data,projects:[...projects,p]};
-    persist(updated);
-    setActiveIdx(updated.projects.length-1); setNewProjName(""); setView("project");
+  const createProject = async () => {
+    if(!newProjName.trim()||!userId) return;
+    const p=await db.createProject(userId, newProjName.trim());
+    setData(d=>({...d,projects:[...d.projects,p]}));
+    setActiveIdx(data.projects.length);
+    setNewProjName(""); setView("project");
   };
 
   const buildPriorCtx = proj => {
@@ -325,19 +474,18 @@ Bullet list.
 
   const analyseNote = async notesVal => {
     if(!notesVal.trim()){setError("Please enter notes.");return;}
-    setNotes(notesVal);
-    setError(""); setLoading(true);
+    setNotes(notesVal); setError(""); setLoading(true);
     const mentioned=extractMentions(notesVal);
     const selfTagged=meInNotes(notesVal);
     setTaggedMembers(mentioned); setTaggedSelf(selfTagged);
-    try {
+    try{
       const prior=buildPriorCtx(activeProject);
       const prompt=`Review new meeting notes.${prior?` Existing context:\n${prior}\n\n`:" "}Identify up to 3 things STILL unclear. Return [] if clear. Respond with ONLY a valid JSON array of strings.\n\nNotes:\n${notesVal}`;
       const raw=await claude(prompt,400);
       const qs=parseJsonSafe(raw);
       if(!qs||!Array.isArray(qs)||qs.length===0){await finaliseNote(notesVal,{},mentioned,selfTagged);}
       else{setQuestions(qs);setAnswers(Object.fromEntries(qs.map((_,i)=>[i,""])));setNotePhase("clarifying");}
-    } catch{await finaliseNote(notesVal,{},mentioned,selfTagged);}
+    }catch{await finaliseNote(notesVal,{},mentioned,selfTagged);}
     finally{setLoading(false);}
   };
 
@@ -346,39 +494,66 @@ Bullet list.
     const n=notesVal||notes;
     const mentioned=mentionedOvr||taggedMembers;
     const selfMentioned=selfOvr??taggedSelf;
-    try {
+    try{
       const clarifs=questions.length>0?"\n\nClarifications:\n"+questions.map((q,i)=>ans[i]?`Q: ${q}\nA: ${ans[i]}`:null).filter(Boolean).join("\n"):"";
       const summary=await claude(`Convert to structured summary:\n1. Overview\n2. Key decisions\n3. Action items\n4. Discussion\n5. Next steps\nUse markdown.\n\nNotes:\n${n}${clarifs}`,1200);
-      const entry={id:Date.now(),raw:n,summary,date:new Date().toISOString(),taggedMembers:mentioned.map(m=>m.id),selfTagged:selfMentioned,clarifications:questions.map((q,i)=>({q,a:ans[i]||""}))};
-      const updNotes=[...activeProject.notes,entry];
-      const allS=updNotes.map((n,i)=>`Meeting ${i+1} (${fmt(n.date)}):\n${n.summary}`).join("\n\n");
-      const status=await claude(`Latest status for "${activeProject.name}". Current state, open actions, decisions, blockers, next steps.\n${allS}`,700);
-      let newTodos=[...todos];
-      if(selfMentioned){const extracted=await extractTodosFromNote(summary,activeProject.id);newTodos=[...todos,...extracted];}
-      let updMembers=[...members];
+
+      const entry=await db.createNote(userId, activeProject.id, {
+        raw:n, summary, selfTagged:selfMentioned,
+        taggedMemberIds:mentioned.map(m=>m.id),
+      });
+
+      const d=await reload();
+      const proj=d.projects.find(p=>p.id===activeProject.id);
+      if(proj){
+        const allS=proj.notes.map((n,i)=>`Meeting ${i+1} (${fmt(n.date)}):\n${n.summary}`).join("\n\n");
+        const status=await claude(`Latest status for "${proj.name}". Current state, open actions, decisions, blockers, next steps.\n${allS}`,700);
+        await db.updateProjectStatus(proj.id, status);
+      }
+
+      if(selfMentioned) await extractTodosFromNote(summary, activeProject.id);
+
       for(const m of mentioned){
         const allM=[];
-        for(const p of projects){const pN=p.id===activeProject.id?updNotes:p.notes;for(const n of pN)if(n.raw.toLowerCase().includes(m.name.toLowerCase())||n.taggedMembers?.includes(m.id))allM.push({project:p.name,date:n.date,summary:n.summary||summary});}
-        if(allM.length>0){try{const ms=await claude(`Summarise ${m.name}'s activity.\n\n${allM.map(a=>`[${a.project}] ${fmt(a.date)}:\n${a.summary}`).join("\n\n---\n\n")}`,700);updMembers=updMembers.map(mb=>mb.id===m.id?{...mb,summary:ms,summaryUpdated:new Date().toISOString()}:mb);}catch{}}
+        for(const p of (d.projects||[])){
+          for(const note of p.notes){
+            if(note.raw.toLowerCase().includes(m.name.toLowerCase())||note.taggedMembers?.includes(m.id))
+              allM.push({project:p.name,date:note.date,summary:note.summary});
+          }
+        }
+        if(allM.length>0){
+          try{
+            const ms=await claude(`Summarise ${m.name}'s activity.\n\n${allM.map(a=>`[${a.project}] ${fmt(a.date)}:\n${a.summary}`).join("\n\n---\n\n")}`,700);
+            await db.updateMemberSummary(m.id, ms);
+          }catch{}
+        }
       }
-      const updProjects=projects.map((p,i)=>i===activeIdx?{...p,notes:updNotes,status,statusUpdated:new Date().toISOString()}:p);
-      const nextData={...data,projects:updProjects,members:updMembers,todos:newTodos};
-      persist(nextData);
-      if(data?.homeWeeklySummary) generateHomeSummary(nextData);
+
+      await reload();
       setNotes(""); setQuestions([]); setAnswers({}); setTaggedMembers([]); setTaggedSelf(false); setNotePhase("input");
       setView("project");
-    } catch{setError("Failed to save. Please try again.");}
+    }catch(e){setError("Failed to save. Please try again."); console.error(e);}
     finally{setLoading(false);}
   };
 
   const deleteNote = async noteId => {
-    const updN=activeProject.notes.filter(n=>n.id!==noteId);
-    let status=null,statusUpdated=null;
-    if(updN.length>0){try{status=await claude(`Latest status for "${activeProject.name}":\n${updN.map((n,i)=>`Meeting ${i+1}:\n${n.summary}`).join("\n\n")}`,700);statusUpdated=new Date().toISOString();}catch{}}
-    persist({...data,projects:projects.map((p,i)=>i===activeIdx?{...p,notes:updN,status,statusUpdated}:p)});
+    await db.deleteNote(noteId);
+    const d=await reload();
+    const proj=d.projects.find(p=>p.id===activeProject.id);
+    if(proj&&proj.notes.length>0){
+      try{
+        const status=await claude(`Latest status for "${proj.name}":\n${proj.notes.map((n,i)=>`Meeting ${i+1}:\n${n.summary}`).join("\n\n")}`,700);
+        await db.updateProjectStatus(proj.id, status);
+        await reload();
+      }catch{}
+    }
   };
 
-  const deleteProject = idx => { persist({...data,projects:projects.filter((_,i)=>i!==idx)}); setView("home"); setActiveIdx(null); };
+  const deleteProject = async idx => {
+    await db.deleteProject(projects[idx].id);
+    await reload();
+    setView("home"); setActiveIdx(null);
+  };
 
   const pendingTodos=todos.filter(t=>!t.done);
   const doneTodos=todos.filter(t=>t.done);
@@ -398,10 +573,8 @@ Bullet list.
       </div>
       <div style={{display:"flex",alignItems:"center",gap:8}}>
         {data?.me&&<div style={{display:"flex",alignItems:"center",gap:5}}><Av name={data.me} size={22} isSelf/><span style={{fontSize:"12px",color:T.mid}}>{data.me}</span></div>}
-        <div style={{display:"flex",alignItems:"center",gap:8}}>
-  <Btn size="sm" onClick={()=>{setNewProjName("");setView("newProject");}}>+ Project</Btn>
-  <Btn size="sm" variant="secondary" onClick={async()=>{ const {createClient} = await import('@supabase/supabase-js'); const s=createClient(import.meta.env.VITE_SUPABASE_URL,import.meta.env.VITE_SUPABASE_ANON_KEY); await s.auth.signOut(); window.location.reload(); }}>Sign out</Btn>
-</div>
+        <Btn size="sm" onClick={()=>{setNewProjName("");setView("newProject");}}>+ Project</Btn>
+        <Btn size="sm" variant="secondary" onClick={signOut}>Sign out</Btn>
       </div>
     </div>
   );
@@ -413,17 +586,23 @@ Bullet list.
     </div>
   );
 
-  if(!data) return <Shell><p style={{color:T.muted,padding:40,textAlign:"center"}}>Loading…</p></Shell>;
+  if(!data) return (
+    <Shell>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"60vh"}}>
+        <p style={{color:T.muted}}>Loading your workspace…</p>
+      </div>
+    </Shell>
+  );
 
   if(!data.me) return (
     <Shell maxW={400}>
       <div style={{paddingTop:60,textAlign:"center"}}>
-        <h1 style={{fontFamily:T.serif,fontSize:"26px",fontWeight:700,margin:"0 0 8px",color:T.ink}}>Debrief</h1>
-        <p style={{color:T.mid,fontSize:"13px",margin:"0 0 32px",lineHeight:1.6}}>Enter your name to get started.</p>
+        <h1 style={{fontFamily:T.serif,fontSize:"26px",fontWeight:700,margin:"0 0 8px",color:T.ink}}>Welcome to Debrief</h1>
+        <p style={{color:T.mid,fontSize:"13px",margin:"0 0 32px",lineHeight:1.6}}>What should we call you?</p>
         <Card>
           <Label>Your Name</Label>
           <input value={meName} onChange={e=>setMeName(e.target.value)} placeholder="e.g. John" onKeyDown={e=>e.key==="Enter"&&saveMe()} style={inp}/>
-          <div style={{marginTop:12}}><Btn onClick={saveMe} disabled={!meName.trim()}>Continue →</Btn></div>
+          <div style={{marginTop:12}}><Btn onClick={saveMe} disabled={!meName.trim()}>Get started →</Btn></div>
         </Card>
       </div>
     </Shell>
@@ -438,7 +617,7 @@ Bullet list.
             <h2 style={{margin:0,fontFamily:T.serif,fontSize:"16px",fontWeight:700}}>Weekly Briefing</h2>
             {data.homeWeeklySummaryDate&&<p style={{margin:"2px 0 0",fontSize:"11px",color:T.muted}}>Updated {fmt(data.homeWeeklySummaryDate)}</p>}
           </div>
-          <Btn variant="secondary" size="sm" onClick={()=>generateHomeSummary()} disabled={homeLoading}>{homeLoading?"Updating…":data.homeWeeklySummary?"↻ Refresh":"Generate"}</Btn>
+          <Btn variant="secondary" size="sm" onClick={generateHomeSummary} disabled={homeLoading}>{homeLoading?"Updating…":data.homeWeeklySummary?"↻ Refresh":"Generate"}</Btn>
         </div>
         {homeLoading?<p style={{color:T.muted,fontSize:"13px"}}>Generating…</p>
           :data.homeWeeklySummary?<MD content={data.homeWeeklySummary} small/>
@@ -545,7 +724,7 @@ Bullet list.
       <Card accent={avatarBg(activeMember.name)}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,flexWrap:"wrap",gap:6}}>
           <h2 style={{margin:0,fontFamily:T.serif,fontSize:"15px",fontWeight:700}}>Activity Summary</h2>
-          {activeMember.summaryUpdated&&<span style={{fontSize:"11px",color:T.muted}}>{fmt(activeMember.summaryUpdated)}</span>}
+          {activeMember.summary_updated_at&&<span style={{fontSize:"11px",color:T.muted}}>{fmt(activeMember.summary_updated_at)}</span>}
         </div>
         {memberLoading?<p style={{color:T.muted,fontSize:"13px"}}>Generating…</p>
           :activeMember.summary?<MD content={activeMember.summary} small/>
@@ -607,7 +786,7 @@ Bullet list.
       <Card accent={pc(activeIdx)}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,flexWrap:"wrap",gap:6}}>
           <h2 style={{margin:0,fontFamily:T.serif,fontSize:"15px",fontWeight:700}}>Project Status</h2>
-          {activeProject.statusUpdated&&<span style={{fontSize:"11px",color:T.muted}}>Updated {fmt(activeProject.statusUpdated)}</span>}
+          {activeProject.status_updated_at&&<span style={{fontSize:"11px",color:T.muted}}>Updated {fmt(activeProject.status_updated_at)}</span>}
         </div>
         {activeProject.notes.length===0?<p style={{color:T.muted,fontSize:"13px",margin:0}}>Status generates after first note.</p>
           :activeProject.status?<MD content={activeProject.status} small/>
