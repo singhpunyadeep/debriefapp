@@ -57,7 +57,7 @@ const db = {
       supabase.from('members').select('*').eq('user_id', userId).order('created_at'),
       supabase.from('note_members').select('*'),
       supabase.from('todos').select('*').eq('user_id', userId).order('created_at'),
-      supabase.from('home_summaries').select('*').eq('user_id', userId).single(),
+      supabase.from('home_summaries').select('*').eq('user_id', userId).maybeSingle(),,
       supabase.from('profiles').select('*').eq('id', userId).single(),
     ]);
 
