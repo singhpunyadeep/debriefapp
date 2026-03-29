@@ -181,7 +181,13 @@ const GroupLabel = ({children,color=T.mid}) => (
   <p style={{margin:"14px 0 6px",fontSize:"10px",fontWeight:700,letterSpacing:"0.09em",textTransform:"uppercase",color}}>{children}</p>
 );
 
-// ─── Search Overlay ───────────────────────────────────────────────────────────
+// ─── Logo ─────────────────────────────────────────────────────────────────────
+const Logo = () => (
+  <div style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer"}} onClick={()=>window.scrollTo(0,0)}>
+    <div style={{width:3,height:22,background:T.accent}}/>
+    <span style={{fontFamily:T.serif,fontSize:"17px",fontWeight:700,color:T.ink,letterSpacing:"-0.02em"}}>Debrief</span>
+  </div>
+);
 const SearchOverlay = ({projects,onClose,onProjectNav}) => {
   const [q,setQ]=useState("");
   const inputRef=useRef(null);
@@ -460,6 +466,8 @@ export default function App() {
   const [notePhase,setNotePhase]=useState("input");
   const [newTodoText,setNewTodoText]=useState("");
   const [newTodoDue,setNewTodoDue]=useState("");
+  const [newTodoProjectId,setNewTodoProjectId]=useState("");
+  const [newTodoMemberId,setNewTodoMemberId]=useState("");
   const [todoFilter,setTodoFilter]=useState("pending");
 
   useEffect(()=>{
@@ -510,32 +518,64 @@ export default function App() {
     setHomeLoading(true);
     try{
       const d=data;
-      const myTodos=(d.todos||[]).filter(t=>t.done||isThisWeek(t.dueDate)||isThisWeek(t.createdAt));
-      const recentNotes=[];
-      for(const p of d.projects) for(const n of p.notes) if(isThisWeek(n.date)||meInNotes(n.raw)) recentNotes.push({project:p.name,date:n.date,summary:n.summary});
+      // Build full project context
+      const projectContext = d.projects.map(p=>{
+        const openTasks = (d.todos||[]).filter(t=>!t.done&&t.projectId===p.id);
+        const doneTasks = (d.todos||[]).filter(t=>t.done&&t.projectId===p.id);
+        return `### ${p.name}
+Status: ${p.status||"No status yet"}
+Open tasks (${openTasks.length}): ${openTasks.length>0?openTasks.map(t=>`- ${t.text}${t.dueDate?` (due ${fmtShort(t.dueDate)})`:""}${isOverdue(t.dueDate)?" OVERDUE":""}`).join("\n"):("none")}
+Completed tasks: ${doneTasks.length>0?doneTasks.map(t=>`- ${t.text}`).join(", "):"none"}
+Recent notes (${p.notes.length}): ${p.notes.slice(-2).map(n=>`[${fmt(n.date)}] ${n.summary.slice(0,200)}`).join(" | ")||"none"}`;
+      }).join("\n\n");
+
+      const standaloneTasks = (d.todos||[]).filter(t=>!t.projectId);
+      const standaloneContext = standaloneTasks.length>0
+        ? standaloneTasks.map(t=>`- [${t.done?"DONE":"PENDING"}] ${t.text}${t.dueDate?` (due ${fmtShort(t.dueDate)})`:""}${!t.done&&isOverdue(t.dueDate)?" OVERDUE":""}`).join("\n")
+        : "none";
+
       const nextTodos=(d.todos||[]).filter(t=>!t.done&&(isNextWeek(t.dueDate)||!t.dueDate)).slice(0,8);
-      const summary=await claude(`Generate a weekly executive briefing for ${d.me||"the user"}.
-This week's meetings:\n${recentNotes.length>0?recentNotes.map(n=>`[${n.project}] ${fmt(n.date)}: ${n.summary.slice(0,250)}`).join("\n"):"None."}
-My tasks:\n${myTodos.length>0?myTodos.map(t=>`[${t.done?"DONE":"PENDING"}] ${t.text}`).join("\n"):"None."}
-Next week:\n${nextTodos.length>0?nextTodos.map(t=>`- ${t.text}`).join("\n"):"Nothing."}
-Write:
-## This Week
-2-3 sentences on accomplishments.
-## Open Items
-Bullet list.
+
+      const prompt=`You are writing a weekly executive briefing for ${d.me||"the user"}. Be specific, direct, and use their actual project names and task names. No filler sentences.
+
+ALL PROJECTS AND THEIR STATUS:
+${projectContext||"No projects yet."}
+
+STANDALONE TASKS (no project):
+${standaloneContext}
+
+Write the briefing in exactly this format:
+
+## Projects
+For each project write:
+### [Project Name]
+One sentence on current status. Then bullet list of open tasks under it (mark OVERDUE ones). Skip projects with no notes and no tasks.
+
+## Standalone Tasks
+Bullet list of tasks not tied to any project. If none, write "None."
+
 ## Next Week
-3-5 actions.`,700);
+3-5 specific, prioritised actions based on what's overdue, pending, or coming up. Use actual task and project names.`;
+
+      const summary=await claude(prompt,1000);
       await db.upsertHomeSummary(userId,summary);
       await reload();
-    }catch{}
+    }catch(e){console.error(e);}
     finally{setHomeLoading(false);}
   };
 
   const addTodo=async()=>{
     if(!newTodoText.trim()||!userId)return;
-    const t=await db.createTodo(userId,{text:newTodoText.trim(),dueDate:newTodoDue||null,projectId:activeIdx!==null?activeProject.id:null,source:'manual'});
+    const assignedProjectId = newTodoProjectId || (activeIdx!==null?activeProject.id:null);
+    const t=await db.createTodo(userId,{
+      text:newTodoText.trim(),
+      dueDate:newTodoDue||null,
+      projectId:assignedProjectId||null,
+      source:'manual',
+      memberId:newTodoMemberId||null,
+    });
     setData(d=>({...d,todos:[...d.todos,t]}));
-    setNewTodoText("");setNewTodoDue("");
+    setNewTodoText("");setNewTodoDue("");setNewTodoProjectId("");setNewTodoMemberId("");
   };
 
   const extractTodosFromNote=async(summary,projectId)=>{
@@ -698,21 +738,20 @@ Bullet list.
   const upcomingTodos=pendingTodos.filter(t=>!isThisWeek(t.dueDate)&&!isOverdue(t.dueDate)&&t.dueDate);
   const undatedTodos=pendingTodos.filter(t=>!t.dueDate&&!isThisWeek(t.createdAt));
 
-  const FloatingSearch=()=>(
-    <button onClick={()=>setShowSearch(true)}
-      style={{position:"fixed",bottom:24,right:24,width:48,height:48,borderRadius:"50%",background:T.accent,color:"#fff",border:"none",fontSize:20,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",boxShadow:"0 4px 12px rgba(0,51,102,0.3)",zIndex:900}}>
-      🔍
-    </button>
-  );
+  const FloatingSearch=()=>null; // replaced by BottomSearchBar
+  const BottomBar=()=><BottomSearchBar onClick={()=>setShowSearch(true)}/>;
 
   const Nav=()=>(
     <div style={{marginBottom:24,paddingBottom:14,borderBottom:`1px solid ${T.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
-      <div id="tour-nav" style={{display:"flex",gap:0,flexWrap:"wrap"}}>
-        {[["home","Overview"],["todos","My Tasks"],["team","Team"]].map(([v,label])=>(
-          <button key={v} onClick={()=>setView(v)} style={{padding:"5px 12px",fontSize:"13px",fontWeight:view===v?700:400,color:view===v?T.accent:T.mid,background:"transparent",border:"none",borderBottom:view===v?`2px solid ${T.accent}`:"2px solid transparent",cursor:"pointer",fontFamily:T.sans}}>
-            {label}
-          </button>
-        ))}
+      <div style={{display:"flex",alignItems:"center",gap:16}}>
+        <Logo/>
+        <div id="tour-nav" style={{display:"flex",gap:0,flexWrap:"wrap"}}>
+          {[["home","Overview"],["todos","My Tasks"],["team","Team"]].map(([v,label])=>(
+            <button key={v} onClick={()=>setView(v)} style={{padding:"5px 12px",fontSize:"13px",fontWeight:view===v?700:400,color:view===v?T.accent:T.mid,background:"transparent",border:"none",borderBottom:view===v?`2px solid ${T.accent}`:"2px solid transparent",cursor:"pointer",fontFamily:T.sans}}>
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
       <div style={{display:"flex",alignItems:"center",gap:8}}>
         {data?.me&&<div style={{display:"flex",alignItems:"center",gap:5}}><Av name={data.me} size={22} isSelf/><span style={{fontSize:"12px",color:T.mid}}>{data.me}</span></div>}
@@ -757,19 +796,19 @@ Bullet list.
     <Shell>
       {showSearch&&<SearchOverlay projects={projects} onClose={()=>setShowSearch(false)} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>}
       {showTour&&<Tour onDone={handleTourDone}/>}
-      <FloatingSearch/>
+      <BottomBar/>
       <Nav/>
-      <Card accent={T.accent} style={{marginBottom:14}}>
+      <Card accent={T.accent} style={{marginBottom:14,borderLeft:`3px solid ${T.accent}`}}>
         <div id="tour-briefing" style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,gap:8,flexWrap:"wrap"}}>
           <div>
-            <h2 style={{margin:0,fontFamily:T.serif,fontSize:"16px",fontWeight:700}}>Weekly Briefing</h2>
-            {data.homeWeeklySummaryDate&&<p style={{margin:"2px 0 0",fontSize:"11px",color:T.muted}}>Updated {fmt(data.homeWeeklySummaryDate)}</p>}
+            <h2 style={{margin:0,fontFamily:T.serif,fontSize:"16px",fontWeight:700,color:T.ink}}>Weekly Briefing</h2>
+            {data.homeWeeklySummaryDate&&<p style={{margin:"2px 0 0",fontSize:"11px",color:T.mid}}>Updated {fmt(data.homeWeeklySummaryDate)}</p>}
           </div>
           <Btn variant="secondary" size="sm" onClick={generateHomeSummary} disabled={homeLoading}>{homeLoading?"Updating…":data.homeWeeklySummary?"↻ Refresh":"Generate"}</Btn>
         </div>
-        {homeLoading?<p style={{color:T.muted,fontSize:"13px"}}>Generating…</p>
+        {homeLoading?<p style={{color:T.mid,fontSize:"13px"}}>Generating your briefing…</p>
           :data.homeWeeklySummary?<MD content={data.homeWeeklySummary} small/>
-          :<p style={{color:T.muted,fontSize:"13px",margin:0}}>Click Generate for your weekly summary.</p>}
+          :<p style={{color:T.mid,fontSize:"13px",margin:0}}>Click Generate to see a full summary of all your projects and tasks.</p>}
       </Card>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
         <Card>
@@ -797,7 +836,7 @@ Bullet list.
   if(view==="todos") return (
     <Shell>
       {showSearch&&<SearchOverlay projects={projects} onClose={()=>setShowSearch(false)} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>}
-      <FloatingSearch/>
+      <BottomBar/>
       <Nav/>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:8}}>
         <SectionTitle>My Tasks</SectionTitle>
@@ -812,6 +851,20 @@ Bullet list.
       <Card>
         <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-end"}}>
           <div style={{flex:"1 1 160px"}}><Label>Task</Label><input value={newTodoText} onChange={e=>setNewTodoText(e.target.value)} placeholder="Add a task…" onKeyDown={e=>e.key==="Enter"&&addTodo()} style={inp}/></div>
+          <div style={{flex:"1 1 120px"}}>
+            <Label>Project</Label>
+            <select value={newTodoProjectId} onChange={e=>setNewTodoProjectId(e.target.value)} style={{...inp,width:"100%"}}>
+              <option value="">No project</option>
+              {projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </div>
+          <div style={{flex:"1 1 120px"}}>
+            <Label>Assign to</Label>
+            <select value={newTodoMemberId} onChange={e=>setNewTodoMemberId(e.target.value)} style={{...inp,width:"100%"}}>
+              <option value="">Myself</option>
+              {members.map(m=><option key={m.id} value={m.id}>{m.name}</option>)}
+            </select>
+          </div>
           <div><Label>Due</Label><input type="date" value={newTodoDue} onChange={e=>setNewTodoDue(e.target.value)} style={{...inp,width:"auto"}}/></div>
           <Btn onClick={addTodo} disabled={!newTodoText.trim()}>Add</Btn>
         </div>
@@ -833,7 +886,7 @@ Bullet list.
   if(view==="team") return (
     <Shell>
       {showSearch&&<SearchOverlay projects={projects} onClose={()=>setShowSearch(false)} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>}
-      <FloatingSearch/>
+      <BottomBar/>
       <Nav/>
       <SectionTitle sub="Tag members in notes using @name.">Team</SectionTitle>
       <Card>
@@ -869,7 +922,7 @@ Bullet list.
   if(view==="memberView"&&activeMember) return (
     <Shell>
       {showSearch&&<SearchOverlay projects={projects} onClose={()=>setShowSearch(false)} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>}
-      <FloatingSearch/>
+      <BottomBar/>
       <Nav/>
       <button onClick={()=>setView("team")} style={{fontSize:"12px",color:T.mid,background:"none",border:"none",cursor:"pointer",padding:"0 0 16px",fontFamily:T.sans}}>← Team</button>
       <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:20,flexWrap:"wrap"}}>
@@ -931,7 +984,7 @@ Bullet list.
     <Shell>
       {showSearch&&<SearchOverlay projects={projects} onClose={()=>setShowSearch(false)} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>}
       {editingNote&&<EditNoteModal note={editingNote} projectName={activeProject.name} onSave={raw=>saveEditedNote(editingNote.id,raw)} onCancel={()=>setEditingNote(null)} saving={editSaving}/>}
-      <FloatingSearch/>
+      <BottomBar/>
       <Nav/>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:18,flexWrap:"wrap",gap:8}}>
         <div style={{display:"flex",alignItems:"center",gap:10,minWidth:0}}>
