@@ -163,10 +163,26 @@ const GroupLabel = ({children,color=T.mid}) => (
 
 // ─── Onboarding Tour ──────────────────────────────────────────────────────────
 const TOUR_STEPS = [
-  {target:"tour-briefing",title:"Your weekly briefing",body:"Debrief writes you a smart weekly summary — what you accomplished, what's pending, and what to focus on next week."},
-  {target:"tour-tasks",title:"Tasks, auto-extracted",body:"Tag yourself with @YourName in meeting notes. Debrief pulls out your action items automatically and adds them here."},
-  {target:"tour-project",title:"Create a project",body:"Group meeting notes by project — a client, a team, or any initiative. Each project gets its own live status summary."},
-  {target:"tour-nav",title:"My Tasks & Team",body:"Track all your tasks across projects in one place. Add team members and tag them in notes to track their activity too."},
+  {
+    target: "tour-briefing",
+    title: "Your command centre",
+    body: "Every week, Debrief reads all your meeting notes and tasks, then writes you a smart briefing — what got done, what's still open, and what to prioritise next week. One click, always current.",
+  },
+  {
+    target: "tour-tasks",
+    title: "Never miss an action item",
+    body: "Tag yourself with @YourName inside meeting notes. Debrief automatically extracts every action item assigned to you and adds it here — organised by overdue, this week, and upcoming.",
+  },
+  {
+    target: "tour-project",
+    title: "Organise by project",
+    body: "Create a project for each client, team, or initiative. Add meeting notes over time and Debrief maintains a live status summary — always showing where things stand without you having to write it.",
+  },
+  {
+    target: "tour-nav",
+    title: "Track your whole team",
+    body: "Go to Team to add colleagues. Tag them with @Name in notes and Debrief builds an activity summary for each person — what they own, what decisions they were part of, and what's open across all projects.",
+  },
 ];
 
 const Tour = ({onDone}) => {
