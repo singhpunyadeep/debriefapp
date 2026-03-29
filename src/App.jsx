@@ -422,7 +422,7 @@ Bullet list.
         <p style={{color:T.mid,fontSize:"13px",margin:"0 0 32px",lineHeight:1.6}}>Enter your name to get started.</p>
         <Card>
           <Label>Your Name</Label>
-          <input value={meName} onChange={e=>setMeName(e.target.value)} placeholder="e.g. Punyadeep" onKeyDown={e=>e.key==="Enter"&&saveMe()} style={inp}/>
+          <input value={meName} onChange={e=>setMeName(e.target.value)} placeholder="e.g. John" onKeyDown={e=>e.key==="Enter"&&saveMe()} style={inp}/>
           <div style={{marginTop:12}}><Btn onClick={saveMe} disabled={!meName.trim()}>Continue →</Btn></div>
         </Card>
       </div>
