@@ -55,10 +55,28 @@ export default function AuthWrapper({ children }) {
   const [authLoading, setAuthLoading] = useState(false);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => setSession(session));
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, session) => setSession(session));
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      if(session) saveProfile(session.user);
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, session) => {
+      setSession(session);
+      if(session) saveProfile(session.user);
+    });
     return () => subscription.unsubscribe();
   }, []);
+
+  const saveProfile = async (user) => {
+    try {
+      await supabase.from('profiles').upsert({
+        id: user.id,
+        name: user.user_metadata?.full_name || user.email?.split('@')[0] || 'User',
+        email: user.email,
+      }, { onConflict: 'id' });
+    } catch(e) {
+      console.log('Profile save error:', e);
+    }
+  };
 
   const handleGoogle = async () => {
     setAuthLoading(true);
