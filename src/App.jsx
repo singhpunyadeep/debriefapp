@@ -243,7 +243,101 @@ const Tour = ({onDone}) => {
   );
 };
 
-// ─── Note Textarea ────────────────────────────────────────────────────────────
+// ─── Search Overlay ───────────────────────────────────────────────────────────
+const SearchOverlay = ({projects, members, onClose, onProjectNav}) => {
+  const [q, setQ] = useState("");
+  const inputRef = useRef(null);
+
+  useEffect(()=>{ setTimeout(()=>inputRef.current?.focus(), 50); }, []);
+
+  const results = useMemo(()=>{
+    if(!q.trim()) return [];
+    const ql = q.toLowerCase();
+    const hits = [];
+    for(const p of projects) {
+      for(const n of p.notes) {
+        const inSummary = n.summary?.toLowerCase().includes(ql);
+        const inRaw = n.raw?.toLowerCase().includes(ql);
+        const inProject = p.name.toLowerCase().includes(ql);
+        if(inSummary||inRaw||inProject) {
+          hits.push({note:n, project:p, projIdx:projects.findIndex(pp=>pp.id===p.id)});
+        }
+      }
+      if(p.name.toLowerCase().includes(ql) && p.notes.length===0) {
+        hits.push({project:p, projIdx:projects.findIndex(pp=>pp.id===p.id), noteOnly:true});
+      }
+    }
+    return hits.slice(0,20);
+  }, [q, projects]);
+
+  const highlight = (text, q) => {
+    if(!q.trim()) return text;
+    const idx = text.toLowerCase().indexOf(q.toLowerCase());
+    if(idx===-1) return text.slice(0,120);
+    const start = Math.max(0, idx-40);
+    const excerpt = text.slice(start, start+160);
+    return (start>0?"…":"")+excerpt+(excerpt.length<text.length?"…":"");
+  };
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1000,display:"flex",flexDirection:"column"}} onClick={onClose}>
+      <div style={{background:T.white,margin:"20px 16px 0",borderRadius:4,padding:"12px 16px",display:"flex",gap:10,alignItems:"center"}} onClick={e=>e.stopPropagation()}>
+        <span style={{fontSize:18,color:T.mid}}>🔍</span>
+        <input ref={inputRef} value={q} onChange={e=>setQ(e.target.value)}
+          placeholder="Search notes, summaries, projects…"
+          style={{flex:1,border:"none",outline:"none",fontSize:"15px",color:T.ink,fontFamily:T.sans,background:"transparent"}}/>
+        <button onClick={onClose} style={{background:"none",border:"none",color:T.muted,fontSize:18,cursor:"pointer",padding:0}}>✕</button>
+      </div>
+      <div style={{flex:1,overflowY:"auto",margin:"8px 16px 16px"}} onClick={e=>e.stopPropagation()}>
+        {q.trim()&&results.length===0&&(
+          <div style={{background:T.white,borderRadius:4,padding:"24px",textAlign:"center",color:T.muted,fontSize:"14px"}}>
+            No results for "{q}"
+          </div>
+        )}
+        {results.map((r,i)=>(
+          <div key={i} onClick={()=>{onProjectNav(r.projIdx);onClose();}}
+            style={{background:T.white,borderRadius:4,padding:"14px 16px",marginBottom:6,cursor:"pointer",borderLeft:`3px solid ${pc(r.projIdx)}`}}>
+            <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:4,flexWrap:"wrap"}}>
+              <Tag color={pc(r.projIdx)}>{r.project.name}</Tag>
+              {r.note&&<span style={{fontSize:"11px",color:T.muted}}>{fmt(r.note.date)}</span>}
+            </div>
+            {r.note&&<p style={{margin:0,fontSize:"13px",color:T.mid,lineHeight:1.5}}>
+              {highlight(r.note.summary?.replace(/[#*]/g,"")||r.note.raw||"", q)}
+            </p>}
+            {r.noteOnly&&<p style={{margin:0,fontSize:"13px",color:T.muted}}>Project — {r.project.notes.length} notes</p>}
+          </div>
+        ))}
+        {!q.trim()&&(
+          <div style={{background:T.white,borderRadius:4,padding:"24px",textAlign:"center",color:T.muted,fontSize:"13px"}}>
+            Start typing to search across all your notes and projects
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ─── Note Edit Modal ──────────────────────────────────────────────────────────
+const EditNoteModal = ({note, projectName, meName, members, onSave, onCancel, saving}) => {
+  const ref = useRef(null);
+  useEffect(()=>{ if(ref.current) ref.current.value = note.raw; }, []);
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+      <div style={{background:T.white,borderRadius:4,padding:"24px",width:"100%",maxWidth:600,maxHeight:"90vh",overflowY:"auto",fontFamily:T.sans}}>
+        <div style={{marginBottom:14}}>
+          <h2 style={{margin:0,fontSize:"18px",fontWeight:700,fontFamily:T.serif,color:T.ink}}>Edit Meeting Notes</h2>
+          <p style={{margin:"2px 0 0",fontSize:"12px",color:T.muted}}>Saving to: {projectName} · Summary will be regenerated</p>
+        </div>
+        <textarea ref={ref} style={{...{width:"100%",padding:"9px 11px",border:`1px solid ${T.border}`,borderRadius:2,fontSize:"14px",color:T.ink,boxSizing:"border-box",fontFamily:T.sans,background:T.white,outline:"none"},height:220,resize:"vertical",lineHeight:1.65}}/>
+        {saving&&<p style={{fontSize:"12px",color:T.accentMid,margin:"8px 0 0"}}>Regenerating summary and project status…</p>}
+        <div style={{display:"flex",gap:8,marginTop:14}}>
+          <Btn onClick={()=>onSave(ref.current?.value||"")} disabled={saving}>{saving?"Saving…":"Save & Regenerate"}</Btn>
+          <Btn variant="secondary" onClick={onCancel} disabled={saving}>Cancel</Btn>
+        </div>
+      </div>
+    </div>
+  );
+};
 const NoteTextarea = ({onSubmit,onCancel,loading,error,projectName,meName,members}) => {
   const ref=useRef(null);
   const [show,setShow]=useState(false);
@@ -352,8 +446,15 @@ export default function App() {
   const [newTodoDue,setNewTodoDue]=useState("");
   const [todoFilter,setTodoFilter]=useState("pending");
 
+  const [showSearch, setShowSearch] = useState(false);
+  const [editingNote, setEditingNote] = useState(null);
+  const [editSaving, setEditSaving] = useState(false);
+
   useEffect(()=>{
-    db.getUser().then(user=>{
+    const handler = e => { if(e.key==="k"&&(e.metaKey||e.ctrlKey)){e.preventDefault();setShowSearch(s=>!s);} };
+    window.addEventListener("keydown", handler);
+    return ()=>window.removeEventListener("keydown", handler);
+  }, []);
       if(user){
         setUserId(user.id);
         db.loadAll(user.id).then(d=>{
@@ -534,6 +635,35 @@ Bullet list.
     if(proj&&proj.notes.length>0){try{const status=await claude(`Latest status for "${proj.name}":\n${proj.notes.map((n,i)=>`Meeting ${i+1}:\n${n.summary}`).join("\n\n")}`,700);await db.updateProjectStatus(proj.id,status);await reload();}catch{}}
   };
 
+  const saveEditedNote = async (noteId, newRaw) => {
+    if(!newRaw.trim()) return;
+    setEditSaving(true);
+    try {
+      const summary = await claude(`Convert to structured summary:\n1. Overview\n2. Key decisions\n3. Action items\n4. Discussion\n5. Next steps\nUse markdown.\n\nNotes:\n${newRaw}`, 1200);
+      await supabase.from('notes').update({ raw: newRaw, summary }).eq('id', noteId);
+      const d = await reload();
+      const proj = d.projects.find(p => p.id === activeProject.id);
+      if(proj) {
+        const allS = proj.notes.map((n,i)=>`Meeting ${i+1} (${fmt(n.date)}):\n${n.summary}`).join("\n\n");
+        const status = await claude(`Latest status for "${proj.name}". Current state, open actions, decisions, blockers, next steps.\n${allS}`, 700);
+        await db.updateProjectStatus(proj.id, status);
+        await reload();
+      }
+      setEditingNote(null);
+    } catch(e) { console.error(e); }
+    finally { setEditSaving(false); }
+  };
+
+  const shareNote = async (note, projectName) => {
+    const text = `📋 *${projectName}* — ${fmt(note.date)}\n\n${note.summary.replace(/[#*]/g,"").trim()}`;
+    if(navigator.share) {
+      try { await navigator.share({ title: `Debrief — ${projectName}`, text }); } catch {}
+    } else {
+      await navigator.clipboard.writeText(text);
+      alert("Summary copied to clipboard!");
+    }
+  };
+
   const deleteProject=async idx=>{await db.deleteProject(projects[idx].id);await reload();setView("home");setActiveIdx(null);};
 
   const pendingTodos=todos.filter(t=>!t.done);
@@ -569,6 +699,17 @@ Bullet list.
     </div>
   );
 
+  // Floating search button — rendered in every view
+  const FloatingSearch = () => (
+    <button onClick={()=>setShowSearch(true)}
+      style={{position:"fixed",bottom:24,right:24,width:48,height:48,borderRadius:"50%",
+        background:T.accent,color:"#fff",border:"none",fontSize:20,cursor:"pointer",
+        display:"flex",alignItems:"center",justifyContent:"center",
+        boxShadow:"0 4px 12px rgba(0,51,102,0.3)",zIndex:900}}>
+      🔍
+    </button>
+  );
+
   if(!data) return <Shell><div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"60vh"}}><p style={{color:T.muted}}>Loading your workspace…</p></div></Shell>;
 
   if(!data.me) return (
@@ -587,7 +728,9 @@ Bullet list.
 
   if(view==="home") return (
     <Shell>
+      {showSearch&&<SearchOverlay projects={projects} members={members} onClose={()=>setShowSearch(false)} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>}
       {showTour&&<Tour onDone={handleTourDone}/>}
+      <FloatingSearch/>
       <Nav/>
       <Card accent={T.accent} style={{marginBottom:14}}>
         <div id="tour-briefing" style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,gap:8,flexWrap:"wrap"}}>
@@ -626,6 +769,8 @@ Bullet list.
 
   if(view==="todos") return (
     <Shell>
+      {showSearch&&<SearchOverlay projects={projects} members={members} onClose={()=>setShowSearch(false)} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>}
+      <FloatingSearch/>
       <Nav/>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:8}}>
         <SectionTitle>My Tasks</SectionTitle>
@@ -657,6 +802,8 @@ Bullet list.
 
   if(view==="team") return (
     <Shell>
+      {showSearch&&<SearchOverlay projects={projects} members={members} onClose={()=>setShowSearch(false)} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>}
+      <FloatingSearch/>
       <Nav/>
       <SectionTitle sub="Tag members in notes using @name.">Team</SectionTitle>
       <Card>
@@ -742,6 +889,9 @@ Bullet list.
 
   if(view==="project"&&activeProject) return (
     <Shell>
+      {showSearch&&<SearchOverlay projects={projects} members={members} onClose={()=>setShowSearch(false)} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>}
+      {editingNote&&<EditNoteModal note={editingNote} projectName={activeProject.name} meName={data.me||"me"} members={members} onSave={raw=>saveEditedNote(editingNote.id,raw)} onCancel={()=>setEditingNote(null)} saving={editSaving}/>}
+      <FloatingSearch/>
       <Nav/>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:18,flexWrap:"wrap",gap:8}}>
         <div style={{display:"flex",alignItems:"center",gap:10,minWidth:0}}>
@@ -788,6 +938,8 @@ Bullet list.
                 </div>
                 <div style={{display:"flex",gap:5,flexShrink:0}}>
                   <Btn variant="secondary" size="sm" onClick={()=>setExpandedNote(expandedNote===n.id?null:n.id)}>{expandedNote===n.id?"Hide":"View"}</Btn>
+                  <Btn variant="secondary" size="sm" onClick={()=>setEditingNote(n)}>Edit</Btn>
+                  <Btn variant="secondary" size="sm" onClick={()=>shareNote(n,activeProject.name)}>Share</Btn>
                   <Btn variant="danger" size="sm" onClick={()=>deleteNote(n.id)}>Del</Btn>
                 </div>
               </div>
