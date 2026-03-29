@@ -144,6 +144,15 @@ const db = {
   async setName(userId, name) {
     await supabase.from('profiles').upsert({ id:userId, name });
   },
+
+  async completeTour(userId) {
+    await supabase.from('profiles').update({ tour_done: true }).eq('id', userId);
+  },
+
+  async getTourDone(userId) {
+    const { data } = await supabase.from('profiles').select('tour_done').eq('id', userId).single();
+    return data?.tour_done || false;
+  },
 };
 
 // ─── UI primitives ────────────────────────────────────────────────────────────
@@ -204,7 +213,118 @@ const GroupLabel = ({children,color=T.mid}) => (
   <p style={{margin:"14px 0 6px",fontSize:"10px",fontWeight:700,letterSpacing:"0.09em",textTransform:"uppercase",color}}>{children}</p>
 );
 
-const NoteTextarea = ({ onSubmit, onCancel, loading, error, projectName, meName, members }) => {
+// ─── Onboarding Tour ─────────────────────────────────────────────────────────
+const TOUR_STEPS = [
+  {
+    target: "tour-briefing",
+    title: "Your weekly briefing",
+    body: "Debrief writes you a smart weekly summary — what you accomplished, what's pending, and what to focus on next week.",
+  },
+  {
+    target: "tour-tasks",
+    title: "Tasks, auto-extracted",
+    body: "Tag yourself with @YourName in meeting notes. Debrief pulls out your action items automatically and adds them here.",
+  },
+  {
+    target: "tour-project",
+    title: "Create a project",
+    body: "Group meeting notes by project — a client, a team, or any initiative. Each project gets its own live status summary.",
+  },
+  {
+    target: "tour-nav",
+    title: "My Tasks & Team",
+    body: "Track all your tasks across projects in one place. Add team members and tag them in notes to track their activity too.",
+  },
+];
+
+const Tour = ({ onDone }) => {
+  const [step, setStep] = useState(0);
+  const [pos, setPos] = useState(null);
+  const isMobile = window.innerWidth < 600;
+
+  useEffect(() => {
+    positionTooltip();
+    window.addEventListener('resize', positionTooltip);
+    return () => window.removeEventListener('resize', positionTooltip);
+  }, [step]);
+
+  const positionTooltip = () => {
+    const el = document.getElementById(TOUR_STEPS[step].target);
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setPos({ top: r.bottom + window.scrollY + 10, left: r.left + window.scrollX, width: r.width });
+  };
+
+  const next = () => { if(step < TOUR_STEPS.length - 1) setStep(s=>s+1); else onDone(); };
+  const prev = () => { if(step > 0) setStep(s=>s-1); };
+  const curr = TOUR_STEPS[step];
+
+  // Mobile: bottom sheet
+  if (isMobile) return (
+    <>
+      <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:999}} onClick={onDone}/>
+      <div style={{position:"fixed",bottom:0,left:0,right:0,background:"#fff",borderRadius:"16px 16px 0 0",
+        padding:"24px 20px 36px",zIndex:1000,fontFamily:"Inter,sans-serif"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+          <span style={{fontSize:"11px",fontWeight:700,letterSpacing:"0.07em",color:"#A8A8A8",textTransform:"uppercase"}}>
+            Step {step+1} of {TOUR_STEPS.length}
+          </span>
+          <button onClick={onDone} style={{background:"none",border:"none",color:"#A8A8A8",fontSize:18,cursor:"pointer",padding:0}}>✕</button>
+        </div>
+        <h3 style={{margin:"0 0 8px",fontSize:"18px",fontWeight:700,fontFamily:"Georgia,serif",color:"#1A1A1A"}}>{curr.title}</h3>
+        <p style={{margin:"0 0 20px",fontSize:"14px",color:"#6B6B6B",lineHeight:1.6}}>{curr.body}</p>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <div style={{display:"flex",gap:5}}>
+            {TOUR_STEPS.map((_,i)=>(
+              <div key={i} style={{width:6,height:6,borderRadius:"50%",background:i===step?"#003366":"#E0DFDB"}}/>
+            ))}
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            {step>0&&<button onClick={prev} style={{padding:"8px 16px",fontSize:"13px",border:"1px solid #E0DFDB",borderRadius:4,background:"transparent",color:"#1A1A1A",cursor:"pointer"}}>← Back</button>}
+            <button onClick={next} style={{padding:"8px 20px",fontSize:"13px",border:"none",borderRadius:4,background:"#003366",color:"#fff",fontWeight:600,cursor:"pointer"}}>
+              {step===TOUR_STEPS.length-1?"Got it ✓":"Next →"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+
+  // Desktop: floating tooltip
+  return (
+    <>
+      <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.25)",zIndex:999}} onClick={onDone}/>
+      {pos&&(
+        <div style={{position:"absolute",top:pos.top,left:Math.min(pos.left, window.innerWidth-280),
+          width:260,background:"#003366",color:"#fff",borderRadius:8,padding:"14px 16px",
+          zIndex:1000,fontFamily:"Inter,sans-serif",boxSizing:"border-box"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
+            <span style={{fontSize:"13px",fontWeight:700}}>{curr.title}</span>
+            <button onClick={onDone} style={{background:"none",border:"none",color:"rgba(255,255,255,0.6)",fontSize:14,cursor:"pointer",padding:0,marginLeft:8}}>✕</button>
+          </div>
+          <p style={{margin:"0 0 14px",fontSize:"12px",lineHeight:1.6,color:"rgba(255,255,255,0.85)"}}>{curr.body}</p>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+            <div style={{display:"flex",gap:4}}>
+              {TOUR_STEPS.map((_,i)=>(
+                <div key={i} style={{width:5,height:5,borderRadius:"50%",background:i===step?"#fff":"rgba(255,255,255,0.35)"}}/>
+              ))}
+            </div>
+            <div style={{display:"flex",gap:6}}>
+              {step>0&&<button onClick={prev} style={{padding:"4px 10px",fontSize:"11px",border:"1px solid rgba(255,255,255,0.3)",borderRadius:3,background:"transparent",color:"#fff",cursor:"pointer"}}>← Back</button>}
+              <button onClick={next} style={{padding:"4px 12px",fontSize:"11px",border:"none",borderRadius:3,background:"rgba(255,255,255,0.2)",color:"#fff",fontWeight:600,cursor:"pointer"}}>
+                {step===TOUR_STEPS.length-1?"Got it ✓":"Next →"}
+              </button>
+            </div>
+          </div>
+          <div style={{position:"absolute",top:-6,left:16,width:0,height:0,
+            borderLeft:"6px solid transparent",borderRight:"6px solid transparent",borderBottom:"6px solid #003366"}}/>
+        </div>
+      )}
+    </>
+  );
+};
+
+// ─── Uncontrolled note textarea ───────────────────────────────────────────────
   const ref = useRef(null);
   const [show, setShow] = useState(false);
   const [q, setQ] = useState("");
@@ -320,13 +440,17 @@ export default function App() {
   const [newTodoDue, setNewTodoDue] = useState("");
   const [todoFilter, setTodoFilter] = useState("pending");
 
+  const [showTour, setShowTour] = useState(false);
+
   useEffect(()=>{
     db.getUser().then(user => {
       if(user) {
         setUserId(user.id);
-        db.loadAll(user.id).then(d => {
+        db.loadAll(user.id).then(async d => {
           setData(d);
           if(d.me) setMeName(d.me);
+          const tourDone = await db.getTourDone(user.id);
+          if(!tourDone && d.me) setShowTour(true);
         });
       }
     });
@@ -352,6 +476,12 @@ export default function App() {
     if(!meName.trim()||!userId) return;
     await db.setName(userId, meName.trim());
     setData(d=>({...d,me:meName.trim()}));
+    setShowTour(true);
+  };
+
+  const handleTourDone = async () => {
+    setShowTour(false);
+    if(userId) await db.completeTour(userId);
   };
 
   const signOut = async () => {
@@ -564,7 +694,7 @@ Bullet list.
 
   const Nav = () => (
     <div style={{marginBottom:24,paddingBottom:14,borderBottom:`1px solid ${T.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
-      <div style={{display:"flex",gap:0,flexWrap:"wrap"}}>
+      <div style={{display:"flex",gap:0,flexWrap:"wrap"}} id="tour-nav">
         {[["home","Overview"],["todos","My Tasks"],["team","Team"]].map(([v,label])=>(
           <button key={v} onClick={()=>setView(v)} style={{padding:"5px 12px",fontSize:"13px",fontWeight:view===v?700:400,color:view===v?T.accent:T.mid,background:"transparent",border:"none",borderBottom:view===v?`2px solid ${T.accent}`:"2px solid transparent",cursor:"pointer",fontFamily:T.sans}}>
             {label}
@@ -573,7 +703,7 @@ Bullet list.
       </div>
       <div style={{display:"flex",alignItems:"center",gap:8}}>
         {data?.me&&<div style={{display:"flex",alignItems:"center",gap:5}}><Av name={data.me} size={22} isSelf/><span style={{fontSize:"12px",color:T.mid}}>{data.me}</span></div>}
-        <Btn size="sm" onClick={()=>{setNewProjName("");setView("newProject");}}>+ Project</Btn>
+        <Btn size="sm" id="tour-project" onClick={()=>{setNewProjName("");setView("newProject");}}>+ Project</Btn>
         <Btn size="sm" variant="secondary" onClick={signOut}>Sign out</Btn>
       </div>
     </div>
@@ -610,9 +740,10 @@ Bullet list.
 
   if(view==="home") return (
     <Shell>
+      {showTour&&<Tour onDone={handleTourDone}/>}
       <Nav/>
-      <Card accent={T.accent} style={{marginBottom:14}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,gap:8,flexWrap:"wrap"}}>
+      <Card accent={T.accent} style={{marginBottom:14}} >
+        <div id="tour-briefing" style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,gap:8,flexWrap:"wrap"}}>
           <div>
             <h2 style={{margin:0,fontFamily:T.serif,fontSize:"16px",fontWeight:700}}>Weekly Briefing</h2>
             {data.homeWeeklySummaryDate&&<p style={{margin:"2px 0 0",fontSize:"11px",color:T.muted}}>Updated {fmt(data.homeWeeklySummaryDate)}</p>}
@@ -625,7 +756,7 @@ Bullet list.
       </Card>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
         <Card>
-          <h3 style={{margin:"0 0 10px",fontSize:"13px",fontWeight:600}}>This Week <span style={{fontSize:"11px",fontWeight:400,color:T.muted}}>({thisWeekTodos.length+overdueTodos.length})</span></h3>
+          <h3 id="tour-tasks" style={{margin:"0 0 10px",fontSize:"13px",fontWeight:600}}>This Week <span style={{fontSize:"11px",fontWeight:400,color:T.muted}}>({thisWeekTodos.length+overdueTodos.length})</span></h3>
           {[...overdueTodos.slice(0,2),...thisWeekTodos.slice(0,3)].map(t=><TodoItem key={t.id} todo={t} projects={projects} onToggle={toggleTodo} onDelete={deleteTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>)}
           {thisWeekTodos.length===0&&overdueTodos.length===0&&<p style={{fontSize:"12px",color:T.muted,margin:0}}>No tasks due this week.</p>}
         </Card>
