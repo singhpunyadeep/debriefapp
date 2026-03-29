@@ -398,7 +398,10 @@ Bullet list.
       </div>
       <div style={{display:"flex",alignItems:"center",gap:8}}>
         {data?.me&&<div style={{display:"flex",alignItems:"center",gap:5}}><Av name={data.me} size={22} isSelf/><span style={{fontSize:"12px",color:T.mid}}>{data.me}</span></div>}
-        <Btn size="sm" onClick={()=>{setNewProjName("");setView("newProject");}}>+ Project</Btn>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+  <Btn size="sm" onClick={()=>{setNewProjName("");setView("newProject");}}>+ Project</Btn>
+  <Btn size="sm" variant="secondary" onClick={async()=>{ const {createClient} = await import('@supabase/supabase-js'); const s=createClient(import.meta.env.VITE_SUPABASE_URL,import.meta.env.VITE_SUPABASE_ANON_KEY); await s.auth.signOut(); window.location.reload(); }}>Sign out</Btn>
+</div>
       </div>
     </div>
   );
