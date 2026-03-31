@@ -928,10 +928,6 @@ ${summary}`,500);
   };
 
   const deleteTodo=async id=>{ await db.deleteTodo(id); setData(d=>({...d,todos:d.todos.filter(t=>t.id!==id)})); };
-  const editTodo=async(id,{text,dueDate})=>{
-    await db.updateTodo(id,{text,dueDate});
-    setData(d=>({...d,todos:d.todos.map(t=>t.id===id?{...t,text,dueDate}:t)}));
-  };
   const editTodo=async(id,text,dueDate)=>{
     await db.updateTodoText(id,text,dueDate);
     setData(d=>({...d,todos:d.todos.map(t=>t.id===id?{...t,text,dueDate}:t)}));
