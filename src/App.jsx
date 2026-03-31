@@ -195,6 +195,9 @@ const db = {
   async updateTodoProject(todoId, projectId) {
     await supabase.from('todos').update({project_id: projectId||null}).eq('id',todoId);
   },
+  async updateTodo(todoId, {text, dueDate}) {
+    await supabase.from('todos').update({text, due_date:dueDate||null}).eq('id',todoId);
+  },
   async deleteTodo(todoId) { await supabase.from('todos').delete().eq('id',todoId); },
   async upsertHomeSummary(userId,summary) { await supabase.from('home_summaries').upsert({user_id:userId,summary,updated_at:new Date().toISOString()}); },
   async setName(userId,name) { await supabase.from('profiles').upsert({id:userId,name}); },
@@ -495,6 +498,7 @@ const TEMPLATES = [
   { id:"sprint_review", label:"Sprint Review", icon:"🔄", structure:`SPRINT REVIEW – [Date]\nSprint: \nAttendees: \n\nCOMPLETED:\n- \n\nNOT COMPLETED (carried over):\n- \n\nDEMO FEEDBACK:\n- \n\nRETROSPECTIVE:\n- What went well: \n- What didn't: \n- Action: @[YourName] to \n\nNEXT SPRINT PRIORITIES:\n1. \n2. \n3. ` },
   { id:"one_on_one", label:"1:1", icon:"👥", structure:`1:1 – [Date]\nWith: \n\nTHEIR UPDATE:\n- \n\nCONCERNS / BLOCKERS RAISED:\n- \n\nFEEDBACK GIVEN:\n- \n\nCOMMITMENTS MADE:\n- [Name] to \n- [Name] to \n\nNEXT 1:1: ` },
   { id:"board_update", label:"Board / Exec", icon:"📊", structure:`BOARD / EXEC UPDATE – [Date]\nAttendees: \n\nPRESENTED:\n- \n\nKEY DECISIONS MADE:\n- \n\nRISKS FLAGGED:\n- \n\nASKS / APPROVALS:\n- \n\nACTION OWNERS:\n- @[YourName] to \n- \n\nNEXT REVIEW: ` },
+  { id:"personal", label:"My Notes", icon:"🧠", structure:`MY NOTES – [Date]\nContext / meeting: \n\nWHAT I'M THINKING:\n- \n\nKEY OBSERVATIONS:\n- \n\nOPEN QUESTIONS:\n- \n\nWHAT I WANT TO DO ABOUT IT:\n- @[YourName] to \n\nHUNCH / INSTINCT:\n` },
 ];
 
 // ─── Bottom Search Bar ────────────────────────────────────────────────────────
@@ -650,18 +654,35 @@ const NoteTextarea=({onSubmit,onCancel,loading,error,projectName,meName,members}
 };
 
 // ─── Todo Item (FIX #3: project tag click opens reassign picker) ──────────────
-const TodoItem=({todo,projects,members,onToggle,onDelete,onProjectNav,onReassignProject})=>{
+const TodoItem=({todo,projects,members,onToggle,onDelete,onProjectNav,onReassignProject,onEdit})=>{
   const proj=todo.projectId?projects.find(p=>p.id===todo.projectId):null;
   const projIdx=proj?projects.findIndex(p=>p.id===todo.projectId):-1;
   const assignedMember=todo.memberId?members.find(m=>m.id===todo.memberId):null;
   const overdue=!todo.done&&isOverdue(todo.dueDate);
+  const [editing,setEditing]=useState(false);
+  const [editText,setEditText]=useState(todo.text);
+  const [editDue,setEditDue]=useState(todo.dueDate||"");
+  const saveEdit=async()=>{
+    if(!editText.trim())return;
+    await onEdit(todo.id,{text:editText.trim(),dueDate:editDue||null});
+    setEditing(false);
+  };
+  if(editing) return (
+    <div style={{padding:"9px 0",borderBottom:`1px solid ${T.border}`}}>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"flex-end"}}>
+        <input value={editText} onChange={e=>setEditText(e.target.value)} onKeyDown={e=>e.key==="Enter"&&saveEdit()} autoFocus style={{...inp,flex:"1 1 160px",fontSize:"13px",padding:"6px 9px"}}/>
+        <input type="date" value={editDue} onChange={e=>setEditDue(e.target.value)} style={{...inp,width:"auto",fontSize:"12px",padding:"6px 9px"}}/>
+        <Btn size="sm" onClick={saveEdit} disabled={!editText.trim()}>Save</Btn>
+        <Btn size="sm" variant="secondary" onClick={()=>{setEditing(false);setEditText(todo.text);setEditDue(todo.dueDate||"");}}>Cancel</Btn>
+      </div>
+    </div>
+  );
   return (
     <div style={{display:"flex",alignItems:"flex-start",gap:10,padding:"9px 0",borderBottom:`1px solid ${T.border}`}}>
       <input type="checkbox" checked={!!todo.done} onChange={()=>onToggle(todo.id)} style={{marginTop:3,accentColor:T.accent,cursor:"pointer",flexShrink:0}}/>
       <div style={{flex:1,minWidth:0}}>
         <p style={{margin:0,fontSize:"13px",color:T.ink,textDecoration:todo.done?"line-through":"none",lineHeight:1.5,wordBreak:"break-word"}}>{todo.text}</p>
         <div style={{display:"flex",gap:5,marginTop:3,flexWrap:"wrap",alignItems:"center"}}>
-          {/* FIX #3: clicking project tag opens reassign picker */}
           {proj
             ? <span style={{display:"inline-flex",alignItems:"center",gap:3,flexShrink:0}}>
                 <Tag color={pc(projIdx)} onClick={()=>onProjectNav&&onProjectNav(projIdx)}>{proj.name}</Tag>
@@ -674,7 +695,10 @@ const TodoItem=({todo,projects,members,onToggle,onDelete,onProjectNav,onReassign
           {todo.source==="ai"&&<span style={{fontSize:"10px",color:T.muted,letterSpacing:"0.05em"}}>AUTO</span>}
         </div>
       </div>
-      <button onClick={()=>onDelete(todo.id)} style={{background:"none",border:"none",color:T.muted,cursor:"pointer",fontSize:14,padding:"0 2px",flexShrink:0}}>✕</button>
+      <div style={{display:"flex",gap:2,flexShrink:0}}>
+        <button onClick={()=>setEditing(true)} style={{background:"none",border:"none",color:T.muted,cursor:"pointer",fontSize:13,padding:"0 3px"}} title="Edit task">✎</button>
+        <button onClick={()=>onDelete(todo.id)} style={{background:"none",border:"none",color:T.muted,cursor:"pointer",fontSize:14,padding:"0 2px"}}>✕</button>
+      </div>
     </div>
   );
 };
@@ -744,7 +768,8 @@ export default function App() {
   const [newTodoMemberId,setNewTodoMemberId]=useState("");
   const [todoFilter,setTodoFilter]=useState("pending");
   const [todoProjectFilter,setTodoProjectFilter]=useState("__all__");
-  const [todoDueFilter,setTodoDueFilter]=useState("all"); // all | overdue | thisweek | upcoming | noduedate
+  const [todoDueFilter,setTodoDueFilter]=useState("all");
+  const [todoMemberFilter,setTodoMemberFilter]=useState("__all__"); // __all__ or member id
   const [activeProjectTab,setActiveProjectTab]=useState("notes");
   const [toast,setToast]=useState(null);
   const [ragPickerProjectId,setRagPickerProjectId]=useState(null);
@@ -903,6 +928,14 @@ ${summary}`,500);
   };
 
   const deleteTodo=async id=>{ await db.deleteTodo(id); setData(d=>({...d,todos:d.todos.filter(t=>t.id!==id)})); };
+  const editTodo=async(id,{text,dueDate})=>{
+    await db.updateTodo(id,{text,dueDate});
+    setData(d=>({...d,todos:d.todos.map(t=>t.id===id?{...t,text,dueDate}:t)}));
+  };
+  const editTodo=async(id,text,dueDate)=>{
+    await db.updateTodoText(id,text,dueDate);
+    setData(d=>({...d,todos:d.todos.map(t=>t.id===id?{...t,text,dueDate}:t)}));
+  };
 
   // FIX #3: reassign todo project
   const handleReassignProject=async(todoId, newProjectId)=>{
@@ -976,38 +1009,54 @@ ${summary}`,500);
     const n=notesVal||notes;
     const mentioned=mentionedOvr??taggedMembersRef.current;
     const selfMentioned=selfOvr??taggedSelfRef.current;
+    const projSnap=activeProject; // capture before async
     try{
       const clarifs=questions.length>0?"\n\nClarifications:\n"+questions.map((q,i)=>ans[i]?`Q: ${q}\nA: ${ans[i]}`:null).filter(Boolean).join("\n"):"";
-      const summary=await claude(`${projCtxPrefix(activeProject)}Convert to structured summary:\n1. Overview\n2. Key decisions\n3. Action items\n4. Discussion\n5. Next steps\nUse markdown.\n\nNotes:\n${n}${clarifs}`,1200);
-      const note=await db.createNote(userId,activeProject.id,{raw:n,summary,selfTagged:selfMentioned,taggedMemberIds:mentioned.map(m=>m.id)});
-      const intel=await extractIntelligence(summary,note.id,activeProject.id,activeProject.name,activeProject.notes,activeProject);
-      await Promise.all([
-        intel.decisions?.length>0?db.saveDecisions(userId,activeProject.id,note.id,intel.decisions):Promise.resolve(),
-        intel.commitments?.length>0?db.saveCommitments(userId,activeProject.id,note.id,intel.commitments,members):Promise.resolve(),
-        intel.quality?db.saveQualityScore(userId,note.id,intel.quality):Promise.resolve(),
-      ]);
-      const d=await reload();
-      const proj=d.projects.find(p=>p.id===activeProject.id);
-      if(proj){
-        const allS=proj.notes.map((nn,i)=>`Meeting ${i+1} (${fmt(nn.date)}):\n${nn.summary}`).join("\n\n");
-        const status=await claude(`${projCtxPrefix(proj)}Latest status for "${proj.name}". Current state, open actions, decisions, blockers, next steps.\n${allS}`,700);
-        await db.updateProjectStatus(proj.id,status);
-        // FIX #6: re-evaluate risks fresh on every note save
-        await reevaluateRisks(proj.id, {...proj, notes:proj.notes}, userId);
-        await suggestRag(proj.id, proj);
-      }
-      if(selfMentioned)await extractTodosFromNote(summary,activeProject.id);
-      for(const m of mentioned){
-        const allM=[];
-        for(const p of(d.projects||[])) for(const nn of p.notes) if(nn.raw.toLowerCase().includes(m.name.toLowerCase())||nn.taggedMembers?.includes(m.id)) allM.push({project:p.name,date:nn.date,summary:nn.summary});
-        if(allM.length>0){try{const ms=await claude(`Summarise ${m.name}'s activity.\n\n${allM.map(a=>`[${a.project}] ${fmt(a.date)}:\n${a.summary}`).join("\n\n---\n\n")}`,700);await db.updateMemberSummary(m.id,ms);}catch{}}
-      }
-      await reload();
+      const summary=await claude(`${projCtxPrefix(projSnap)}Convert to structured summary:\n1. Overview\n2. Key decisions\n3. Action items\n4. Discussion\n5. Next steps\nUse markdown.\n\nNotes:\n${n}${clarifs}`,1200);
+      const note=await db.createNote(userId,projSnap.id,{raw:n,summary,selfTagged:selfMentioned,taggedMemberIds:mentioned.map(m=>m.id)});
+
+      // ── Navigate immediately — user can see the note now ──────────────────
       setNotes(""); setQuestions([]); setAnswers({}); setTaggedMembers([]); setTaggedSelf(false);
       taggedMembersRef.current=[]; taggedSelfRef.current=false;
-      setNotePhase("input"); setView("project");
-    }catch(e){setError("Failed to save. Please try again.");console.error(e);}
-    finally{setLoading(false);}
+      setNotePhase("input"); setLoading(false); setView("project");
+      await reload(); // refresh so note appears
+
+      // ── All remaining AI runs silently in background ──────────────────────
+      const bgRun = async () => {
+        try {
+          // Intelligence extraction + saves in parallel
+          const [intel] = await Promise.all([
+            extractIntelligence(summary,note.id,projSnap.id,projSnap.name,projSnap.notes,projSnap),
+          ]);
+          await Promise.all([
+            intel.decisions?.length>0?db.saveDecisions(userId,projSnap.id,note.id,intel.decisions):Promise.resolve(),
+            intel.commitments?.length>0?db.saveCommitments(userId,projSnap.id,note.id,intel.commitments,members):Promise.resolve(),
+            intel.quality?db.saveQualityScore(userId,note.id,intel.quality):Promise.resolve(),
+            selfMentioned?extractTodosFromNote(summary,projSnap.id):Promise.resolve(),
+          ]);
+          const d=await reload();
+          const proj=d.projects.find(p=>p.id===projSnap.id);
+          if(proj){
+            // Status + risks + RAG all fire in parallel
+            const allS=proj.notes.map((nn,i)=>`Meeting ${i+1} (${fmt(nn.date)}):\n${nn.summary}`).join("\n\n");
+            await Promise.all([
+              claude(`${projCtxPrefix(proj)}Latest status for "${proj.name}". Current state, open actions, decisions, blockers, next steps.\n${allS}`,700)
+                .then(status=>db.updateProjectStatus(proj.id,status)).catch(()=>{}),
+              reevaluateRisks(proj.id,{...proj,notes:proj.notes},userId),
+              suggestRag(proj.id,proj),
+            ]);
+            // Member summaries — lowest priority, run last
+            for(const m of mentioned){
+              const allM=[];
+              for(const p of(d.projects||[])) for(const nn of p.notes) if(nn.raw.toLowerCase().includes(m.name.toLowerCase())||nn.taggedMembers?.includes(m.id)) allM.push({project:p.name,date:nn.date,summary:nn.summary});
+              if(allM.length>0){try{const ms=await claude(`Summarise ${m.name}'s activity.\n\n${allM.map(a=>`[${a.project}] ${fmt(a.date)}:\n${a.summary}`).join("\n\n---\n\n")}`,700);await db.updateMemberSummary(m.id,ms);}catch{}}
+            }
+            await reload();
+          }
+        } catch(e){ console.error("Background processing error:",e); }
+      };
+      bgRun(); // fire and forget — does NOT block navigation
+    }catch(e){setError("Failed to save. Please try again.");console.error(e);setLoading(false);}
   };
 
   const deleteNote=async noteId=>{
@@ -1019,14 +1068,21 @@ ${summary}`,500);
 
   const saveEditedNote=async(noteId,newRaw)=>{
     if(!newRaw.trim())return; setEditSaving(true);
+    const projSnap=activeProject;
     try{
-      const summary=await claude(`${projCtxPrefix(activeProject)}Convert to structured summary:\n1. Overview\n2. Key decisions\n3. Action items\n4. Discussion\n5. Next steps\nUse markdown.\n\nNotes:\n${newRaw}`,1200);
+      const summary=await claude(`${projCtxPrefix(projSnap)}Convert to structured summary:\n1. Overview\n2. Key decisions\n3. Action items\n4. Discussion\n5. Next steps\nUse markdown.\n\nNotes:\n${newRaw}`,1200);
       await db.updateNote(noteId,{raw:newRaw,summary});
-      const d=await reload();
-      const proj=d.projects.find(p=>p.id===activeProject?.id);
-      if(proj){const allS=proj.notes.map((n,i)=>`Meeting ${i+1} (${fmt(n.date)}):\n${n.summary}`).join("\n\n");const status=await claude(`${projCtxPrefix(proj)}Latest status for "${proj.name}".\n${allS}`,700);await db.updateProjectStatus(proj.id,status);await reload();}
-      setEditingNote(null);
-    }catch(e){console.error(e);}finally{setEditSaving(false);}
+      setEditingNote(null); setEditSaving(false);
+      await reload();
+      // Status update in background
+      (async()=>{
+        try{
+          const d=await db.loadAll(userId);
+          const proj=d.projects.find(p=>p.id===projSnap?.id);
+          if(proj){const allS=proj.notes.map((n,i)=>`Meeting ${i+1} (${fmt(n.date)}):\n${n.summary}`).join("\n\n");const status=await claude(`${projCtxPrefix(proj)}Latest status for "${proj.name}".\n${allS}`,700);await db.updateProjectStatus(proj.id,status);await reload();}
+        }catch{}
+      })();
+    }catch(e){console.error(e);setEditSaving(false);}
   };
 
   const shareNote=async(note,projectName)=>{
@@ -1170,7 +1226,7 @@ ${summary}`,500);
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
         <Card>
           <h3 id="tour-tasks" style={{margin:"0 0 10px",fontSize:"13px",fontWeight:600,color:T.ink}}>This Week <span style={{fontSize:"11px",fontWeight:400,color:T.muted}}>({thisWeekTodos.length+overdueTodos.length})</span></h3>
-          {[...overdueTodos.slice(0,2),...thisWeekTodos.slice(0,3)].map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,curProjId)=>setReassignTodo({id,currentProjectId:curProjId})}/>)}
+          {[...overdueTodos.slice(0,2),...thisWeekTodos.slice(0,3)].map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,curProjId)=>setReassignTodo({id,currentProjectId:curProjId})}/>)}
           {thisWeekTodos.length===0&&overdueTodos.length===0&&<p style={{fontSize:"12px",color:T.muted,margin:0}}>No tasks due this week.</p>}
         </Card>
         {/* FIX #5: Projects card — show all with scroll */}
@@ -1259,12 +1315,13 @@ ${summary}`,500);
     // Apply project + due date filters on top of pending/done
     const baseList = todoFilter==="done" ? doneTodos : pendingTodos;
     const projFiltered = todoProjectFilter==="__all__" ? baseList : baseList.filter(t=>(todoProjectFilter==="__none__" ? !t.projectId : t.projectId===todoProjectFilter));
-    const dueFiltered = todoDueFilter==="all" ? projFiltered
-      : todoDueFilter==="overdue" ? projFiltered.filter(t=>isOverdue(t.dueDate))
-      : todoDueFilter==="thisweek" ? projFiltered.filter(t=>isThisWeek(t.dueDate)||(!t.dueDate&&isThisWeek(t.createdAt)))
-      : todoDueFilter==="upcoming" ? projFiltered.filter(t=>t.dueDate&&!isThisWeek(t.dueDate)&&!isOverdue(t.dueDate))
-      : projFiltered.filter(t=>!t.dueDate); // noduedate
-    const isFiltered = todoProjectFilter!=="__all__" || todoDueFilter!=="all";
+    const memberFiltered = todoMemberFilter==="__all__" ? projFiltered : projFiltered.filter(t=>t.memberId===todoMemberFilter);
+    const dueFiltered = todoDueFilter==="all" ? memberFiltered
+      : todoDueFilter==="overdue" ? memberFiltered.filter(t=>isOverdue(t.dueDate))
+      : todoDueFilter==="thisweek" ? memberFiltered.filter(t=>isThisWeek(t.dueDate)||(!t.dueDate&&isThisWeek(t.createdAt)))
+      : todoDueFilter==="upcoming" ? memberFiltered.filter(t=>t.dueDate&&!isThisWeek(t.dueDate)&&!isOverdue(t.dueDate))
+      : memberFiltered.filter(t=>!t.dueDate);
+    const isFiltered = todoProjectFilter!=="__all__" || todoDueFilter!=="all" || todoMemberFilter!=="__all__";
     return (
     <Shell>
       {toast&&<Toast message={toast} onDone={()=>setToast(null)}/>}
@@ -1297,7 +1354,11 @@ ${summary}`,500);
           <option value="upcoming">Upcoming</option>
           <option value="noduedate">No due date</option>
         </select>
-        {isFiltered&&<button onClick={()=>{setTodoProjectFilter("__all__");setTodoDueFilter("all");}} style={{fontSize:"11px",color:T.danger,background:"none",border:"none",cursor:"pointer",fontFamily:T.sans,padding:0}}>✕ Clear filters</button>}
+        {members.length>0&&<select value={todoMemberFilter} onChange={e=>setTodoMemberFilter(e.target.value)} style={{...inp,width:"auto",fontSize:"12px",padding:"5px 8px"}}>
+          <option value="__all__">All assignees</option>
+          {members.map(m=><option key={m.id} value={m.id}>{m.name}</option>)}
+        </select>}
+        {isFiltered&&<button onClick={()=>{setTodoProjectFilter("__all__");setTodoDueFilter("all");setTodoMemberFilter("__all__");}} style={{fontSize:"11px",color:T.danger,background:"none",border:"none",cursor:"pointer",fontFamily:T.sans,padding:0}}>✕ Clear filters</button>}
         <span style={{fontSize:"11px",color:T.muted,marginLeft:"auto"}}>{dueFiltered.length} task{dueFiltered.length!==1?"s":""}</span>
       </div>
 
@@ -1321,15 +1382,15 @@ ${summary}`,500);
       {isFiltered ? (
         dueFiltered.length===0
           ? <Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No tasks match these filters.</p></Card>
-          : <Card>{dueFiltered.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card>
+          : <Card>{dueFiltered.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card>
       ) : todoFilter==="pending" ? (<>
-        {overdueTodos.length>0&&<><GroupLabel color={T.danger}>Overdue</GroupLabel><Card>{overdueTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card></>}
-        {thisWeekTodos.length>0&&<><GroupLabel>This Week</GroupLabel><Card>{thisWeekTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card></>}
-        {upcomingTodos.length>0&&<><GroupLabel>Upcoming</GroupLabel><Card>{upcomingTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card></>}
-        {undatedTodos.length>0&&<><GroupLabel>No Date</GroupLabel><Card>{undatedTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card></>}
+        {overdueTodos.length>0&&<><GroupLabel color={T.danger}>Overdue</GroupLabel><Card>{overdueTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card></>}
+        {thisWeekTodos.length>0&&<><GroupLabel>This Week</GroupLabel><Card>{thisWeekTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card></>}
+        {upcomingTodos.length>0&&<><GroupLabel>Upcoming</GroupLabel><Card>{upcomingTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card></>}
+        {undatedTodos.length>0&&<><GroupLabel>No Date</GroupLabel><Card>{undatedTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card></>}
         {pendingTodos.length===0&&<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>All caught up.</p></Card>}
       </>) : (
-        doneTodos.length===0?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No completed tasks yet.</p></Card>:<Card>{[...doneTodos].reverse().map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card>
+        doneTodos.length===0?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No completed tasks yet.</p></Card>:<Card>{[...doneTodos].reverse().map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card>
       )}
     </Shell>
     );
@@ -1420,7 +1481,7 @@ ${summary}`,500);
           <input type="date" value={newProjDeadline} onChange={e=>setNewProjDeadline(e.target.value)} style={{...inp,width:"auto"}}/>
         </div>
         <div>
-          <Label>Project Context <span style={{fontSize:"10px",fontWeight:400,color:T.muted,textTransform:"none",letterSpacing:0}}>(optional — helps Claude ask fewer clarification questions)</span></Label>
+          <Label>Project Context <span style={{fontSize:"10px",fontWeight:400,color:T.muted,textTransform:"none",letterSpacing:0}}>(optional — helps Debrief ask fewer clarification questions)</span></Label>
           <textarea value={newProjContext} onChange={e=>setNewProjContext(e.target.value)} placeholder={`e.g. "This is a 6-month ERP rollout for a 200-person FMCG company. Key stakeholders: CFO and Head of Supply Chain. Main risks are data migration and change management. We use SAP and o9."`} style={{...inp,height:100,resize:"vertical",lineHeight:1.6,fontSize:"13px"}}/>
           <p style={{margin:"4px 0 0",fontSize:"11px",color:T.muted}}>This context will be included in every AI analysis for this project.</p>
         </div>
@@ -1461,21 +1522,32 @@ ${summary}`,500);
         </div>
       </div>
 
-      {/* FIX #7: Project context card — editable */}
+      {/* Project context card — collapsible */}
       {(activeProject.context||editingContext)&&(
-        <Card style={{marginBottom:10,background:"#FAFAF8",borderLeft:`3px solid ${T.accentMid}`}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:editingContext?8:0}}>
-            <h3 style={{margin:0,fontSize:"11px",fontWeight:700,letterSpacing:"0.07em",textTransform:"uppercase",color:T.accentMid}}>Project Context</h3>
-            {!editingContext&&<button onClick={()=>{setContextDraft(activeProject.context||"");setEditingContext(true);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:"11px",color:T.mid,fontFamily:T.sans}}>Edit</button>}
+        <Card style={{marginBottom:10,background:"#FAFAF8",borderLeft:`3px solid ${T.accentMid}`,padding:"10px 18px"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <button onClick={()=>setEditingContext(v=>typeof v==="string"?false:v===false?"open":false)} style={{background:"none",border:"none",cursor:"pointer",display:"flex",alignItems:"center",gap:6,padding:0,fontFamily:T.sans}}>
+              <h3 style={{margin:0,fontSize:"11px",fontWeight:700,letterSpacing:"0.07em",textTransform:"uppercase",color:T.accentMid}}>Project Context</h3>
+              <span style={{fontSize:"10px",color:T.muted}}>{editingContext==="open"||editingContext===true?"▲":"▼"}</span>
+            </button>
+            <div style={{display:"flex",gap:8}}>
+              {(editingContext==="open"||editingContext===true)&&!editingContext?.editing&&<button onClick={()=>setEditingContext("editing")} style={{background:"none",border:"none",cursor:"pointer",fontSize:"11px",color:T.mid,fontFamily:T.sans}}>Edit</button>}
+            </div>
           </div>
-          {editingContext
-            ?<><textarea value={contextDraft} onChange={e=>setContextDraft(e.target.value)} style={{...inp,height:80,resize:"vertical",lineHeight:1.6,fontSize:"13px",marginBottom:8}}/><div style={{display:"flex",gap:8}}><Btn size="sm" onClick={saveContext}>Save</Btn><Btn size="sm" variant="secondary" onClick={()=>setEditingContext(false)}>Cancel</Btn></div></>
-            :<p style={{margin:"4px 0 0",fontSize:"12px",color:T.mid,lineHeight:1.5}}>{activeProject.context}</p>
-          }
+          {editingContext==="editing"&&(
+            <div style={{marginTop:8}}>
+              <textarea value={contextDraft} onChange={e=>setContextDraft(e.target.value)} style={{...inp,height:80,resize:"vertical",lineHeight:1.6,fontSize:"13px",marginBottom:8}}/>
+              <div style={{display:"flex",gap:8}}><Btn size="sm" onClick={saveContext}>Save</Btn><Btn size="sm" variant="secondary" onClick={()=>setEditingContext(false)}>Cancel</Btn></div>
+            </div>
+          )}
+          {(editingContext==="open"||editingContext===true)&&editingContext!=="editing"&&(
+            <p style={{margin:"6px 0 0",fontSize:"12px",color:T.mid,lineHeight:1.5}}>{activeProject.context}</p>
+          )}
+          {editingContext===false&&<p style={{margin:"4px 0 0",fontSize:"11px",color:T.muted,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{activeProject.context.slice(0,80)}{activeProject.context.length>80?"…":""}</p>}
         </Card>
       )}
-      {!activeProject.context&&!editingContext&&(
-        <button onClick={()=>{setContextDraft("");setEditingContext(true);}} style={{fontSize:"12px",color:T.muted,background:"none",border:"none",cursor:"pointer",fontFamily:T.sans,padding:"0 0 10px",display:"block"}}>+ Add project context (helps Claude ask fewer questions)</button>
+      {!activeProject.context&&editingContext!=="editing"&&editingContext!=="open"&&editingContext!==true&&(
+        <button onClick={()=>{setContextDraft("");setEditingContext("editing");}} style={{fontSize:"12px",color:T.muted,background:"none",border:"none",cursor:"pointer",fontFamily:T.sans,padding:"0 0 10px",display:"block"}}>+ Add project context (helps Debrief ask fewer questions)</button>
       )}
 
       {/* Deadline display + inline edit */}
@@ -1508,7 +1580,7 @@ ${summary}`,500);
       {todos.filter(t=>t.projectId===activeProject.id&&!t.done).length>0&&(
         <Card>
           <h3 style={{margin:"0 0 8px",fontSize:"13px",fontWeight:600,color:T.ink}}>Open Tasks</h3>
-          {todos.filter(t=>t.projectId===activeProject.id&&!t.done).map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}
+          {todos.filter(t=>t.projectId===activeProject.id&&!t.done).map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}
         </Card>
       )}
 
