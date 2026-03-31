@@ -24,16 +24,8 @@ const isThisWeek = iso => {
   const e=new Date(s); e.setDate(s.getDate()+6); e.setHours(23,59,59,999);
   return d>=s && d<=e;
 };
-const isNextWeek = iso => {
-  const d=new Date(iso), now=new Date(), s=new Date(now);
-  const day = now.getDay() || 7;
-  s.setDate(now.getDate()-day+8); s.setHours(0,0,0,0);
-  const e=new Date(s); e.setDate(s.getDate()+6); e.setHours(23,59,59,999);
-  return d>=s && d<=e;
-};
 const isOverdue = iso => iso && new Date(iso)<new Date() && !isThisWeek(iso);
 
-// ─── RAG helpers ──────────────────────────────────────────────────────────────
 const RAG_LABELS = { red:"Red", amber:"Amber", green:"Green" };
 const RAG_COLORS = { red:T.danger, amber:T.warning, green:T.success };
 const RagDot = ({rag, size=10}) => rag
@@ -56,12 +48,8 @@ const parseJsonSafe = raw => {
 };
 
 const sanitiseHtml = html =>
-  html
-    .replace(/<script[\s\S]*?<\/script>/gi,"")
-    .replace(/<style[\s\S]*?<\/style>/gi,"")
-    .replace(/\son\w+="[^"]*"/gi,"")
-    .replace(/\son\w+='[^']*'/gi,"")
-    .replace(/javascript:/gi,"");
+  html.replace(/<script[\s\S]*?<\/script>/gi,"").replace(/<style[\s\S]*?<\/style>/gi,"")
+      .replace(/\son\w+="[^"]*"/gi,"").replace(/\son\w+='[^']*'/gi,"").replace(/javascript:/gi,"");
 
 // ─── DB ───────────────────────────────────────────────────────────────────────
 const db = {
@@ -83,15 +71,17 @@ const db = {
       safe(()=>supabase.from('profiles').select('*').eq('id',userId).single().then(r=>r.data)),
       safe(()=>supabase.from('decisions').select('*').eq('user_id',userId).order('date').then(r=>r.data)),
       safe(()=>supabase.from('commitments').select('*').eq('user_id',userId).order('date').then(r=>r.data)),
-      safe(()=>supabase.from('risks').select('*').eq('user_id',userId).eq('dismissed',false).then(r=>r.data)),
+      // FIX #6: load ALL risks (including dismissed) so we can wipe & re-evaluate per project
+      safe(()=>supabase.from('risks').select('*').eq('user_id',userId).order('detected_at').then(r=>r.data)),
       safe(()=>supabase.from('quality_scores').select('*').eq('user_id',userId).then(r=>r.data)),
     ]);
+    const allRisks = risks||[];
     return {
       projects: (projects||[]).map(p=>({
         ...p, statusUpdated:p.status_updated_at,
-        // FEATURE 1: include rag fields
-        rag: p.rag || null,
-        ragOverride: p.rag_override || false,
+        rag: p.rag||null, ragOverride: p.rag_override||false,
+        // FIX #7: include project context
+        context: p.context||"",
         notes:(notes||[]).filter(n=>n.project_id===p.id).map(n=>({
           ...n, selfTagged:n.self_tagged,
           taggedMembers:(noteMembers||[]).filter(nm=>nm.note_id===n.id).map(nm=>nm.member_id),
@@ -99,28 +89,32 @@ const db = {
         })),
         decisions:(decisions||[]).filter(d=>d.project_id===p.id),
         commitments:(commitments||[]).filter(c=>c.project_id===p.id),
-        risks:(risks||[]).filter(r=>r.project_id===p.id),
+        // only undismissed shown on project, but all loaded so re-eval can wipe cleanly
+        risks: allRisks.filter(r=>r.project_id===p.id && !r.dismissed),
       })),
       members:members||[],
       todos:(todos||[]).map(t=>({...t,dueDate:t.due_date,projectId:t.project_id,doneAt:t.done_at,memberId:t.member_id})),
-      risks:risks||[],
+      // global undismissed risks for Risk Radar
+      risks: allRisks.filter(r=>!r.dismissed),
       me:profile?.name||null, tourDone:profile?.tour_done||false,
       homeWeeklySummary:homeSummary?.summary||null, homeWeeklySummaryDate:homeSummary?.updated_at||null,
     };
   },
 
-  async createProject(userId,name) {
-    const {data}=await supabase.from('projects').insert({user_id:userId,name}).select().single();
-    return {...data,notes:[],decisions:[],commitments:[],risks:[],status:null,statusUpdated:null,rag:null,ragOverride:false};
+  async createProject(userId, name, context="") {
+    const {data}=await supabase.from('projects').insert({user_id:userId,name,context}).select().single();
+    return {...data,notes:[],decisions:[],commitments:[],risks:[],status:null,statusUpdated:null,rag:null,ragOverride:false,context:context||""};
   },
   async updateProjectStatus(projectId,status) {
     await supabase.from('projects').update({status,status_updated_at:new Date().toISOString()}).eq('id',projectId);
   },
-  // FEATURE 1: save RAG — rag_override=true means user manually set it
+  // FIX #7: update context
+  async updateProjectContext(projectId, context) {
+    await supabase.from('projects').update({context}).eq('id',projectId);
+  },
   async updateProjectRag(projectId, rag, isOverride=false) {
     await supabase.from('projects').update({rag, rag_override: isOverride}).eq('id', projectId);
   },
-
   async deleteProject(projectId) {
     await Promise.all([
       supabase.from('risks').delete().eq('project_id',projectId),
@@ -149,7 +143,6 @@ const db = {
     await supabase.from('note_members').delete().eq('note_id',noteId);
     await supabase.from('notes').delete().eq('id',noteId);
   },
-
   async saveDecisions(userId,projectId,noteId,decisions) {
     if(!decisions?.length) return;
     await supabase.from('decisions').insert(decisions.map(d=>({user_id:userId,project_id:projectId,note_id:noteId,decision_text:d.decision,context:d.context,date:new Date().toISOString()})));
@@ -167,10 +160,15 @@ const db = {
   async saveQualityScore(userId,noteId,{score,feedback,breakdown}) {
     await supabase.from('quality_scores').upsert({user_id:userId,note_id:noteId,score,feedback,breakdown});
   },
-  async saveRisks(userId,projectId,risks) {
+  // FIX #6: wipe all existing risks for a project then insert fresh ones
+  async replaceRisks(userId, projectId, risks) {
+    await supabase.from('risks').delete().eq('project_id', projectId);
     if(!risks?.length) return;
-    await supabase.from('risks').insert(risks.map(r=>({user_id:userId,project_id:projectId,risk_text:r.text,severity:r.severity||'medium',dismissed:false,detected_at:new Date().toISOString()})));
+    await supabase.from('risks').insert(
+      risks.map(r=>({user_id:userId,project_id:projectId,risk_text:r.text,severity:r.severity||'high',dismissed:false,detected_at:new Date().toISOString()}))
+    );
   },
+  // kept for legacy dismiss from UI
   async dismissRisk(riskId) { await supabase.from('risks').update({dismissed:true}).eq('id',riskId); },
 
   async createMember(userId,{name,role}) {
@@ -189,12 +187,15 @@ const db = {
     return {...data,dueDate:data.due_date,projectId:data.project_id,memberId:data.member_id};
   },
   async toggleTodo(todoId,done) { await supabase.from('todos').update({done,done_at:done?new Date().toISOString():null}).eq('id',todoId); },
+  // FIX #3: reassign project tag on a task
+  async updateTodoProject(todoId, projectId) {
+    await supabase.from('todos').update({project_id: projectId||null}).eq('id',todoId);
+  },
   async deleteTodo(todoId) { await supabase.from('todos').delete().eq('id',todoId); },
   async upsertHomeSummary(userId,summary) { await supabase.from('home_summaries').upsert({user_id:userId,summary,updated_at:new Date().toISOString()}); },
   async setName(userId,name) { await supabase.from('profiles').upsert({id:userId,name}); },
   async completeTour(userId) { await supabase.from('profiles').update({tour_done:true}).eq('id',userId); },
 
-  // FEATURE 4: share token ops — uses a 'share_tokens' table
   async createShareToken(userId, memberId) {
     const token = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
     const {data} = await supabase.from('share_tokens')
@@ -203,24 +204,15 @@ const db = {
     return data?.token || token;
   },
   async getShareData(token) {
-    // Fetch token row (no auth needed — public read by token)
     const {data:tokenRow} = await supabase.from('share_tokens').select('*').eq('token',token).maybeSingle();
     if(!tokenRow) return null;
     const {member_id, user_id} = tokenRow;
-    const [
-      {data:member},
-      {data:todos},
-      {data:projects},
-    ] = await Promise.all([
+    const [{data:member},{data:todos},{data:projects}] = await Promise.all([
       supabase.from('members').select('*').eq('id',member_id).single(),
       supabase.from('todos').select('*').eq('user_id',user_id).eq('member_id',member_id).order('created_at'),
       supabase.from('projects').select('id,name').eq('user_id',user_id),
     ]);
-    return {
-      member,
-      todos: (todos||[]).map(t=>({...t,dueDate:t.due_date,projectId:t.project_id})),
-      projects: projects||[],
-    };
+    return { member, todos:(todos||[]).map(t=>({...t,dueDate:t.due_date,projectId:t.project_id})), projects:projects||[] };
   },
   async toggleSharedTodo(todoId, done) {
     await supabase.from('todos').update({done, done_at:done?new Date().toISOString():null}).eq('id',todoId);
@@ -298,14 +290,10 @@ const ScoreBadge = ({score}) => {
 
 const Toast = ({message,onDone}) => {
   useEffect(()=>{const t=setTimeout(onDone,2200);return()=>clearTimeout(t);},[]);
-  return (
-    <div style={{position:"fixed",bottom:80,left:"50%",transform:"translateX(-50%)",background:T.ink,color:"#fff",padding:"9px 18px",borderRadius:4,fontSize:"13px",fontFamily:T.sans,zIndex:2000,whiteSpace:"nowrap",boxShadow:"0 4px 16px rgba(0,0,0,0.18)"}}>
-      {message}
-    </div>
-  );
+  return <div style={{position:"fixed",bottom:80,left:"50%",transform:"translateX(-50%)",background:T.ink,color:"#fff",padding:"9px 18px",borderRadius:4,fontSize:"13px",fontFamily:T.sans,zIndex:2000,whiteSpace:"nowrap",boxShadow:"0 4px 16px rgba(0,0,0,0.18)"}}>{message}</div>;
 };
 
-// ─── FEATURE 1: RAG Override Picker ──────────────────────────────────────────
+// ─── RAG Override Picker ──────────────────────────────────────────────────────
 const RagPicker = ({current, onSelect, onClose}) => (
   <div style={{position:"fixed",inset:0,zIndex:500,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={onClose}>
     <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:4,padding:"16px",boxShadow:"0 4px 20px rgba(0,0,0,0.12)",minWidth:200}} onClick={e=>e.stopPropagation()}>
@@ -321,11 +309,29 @@ const RagPicker = ({current, onSelect, onClose}) => (
   </div>
 );
 
-// ─── FEATURE 2: Pre-meeting Briefing Modal ────────────────────────────────────
+// FIX #3: Project tag picker for reassigning a task's project
+const ProjectTagPicker = ({projects, currentProjectId, onSelect, onClose}) => (
+  <div style={{position:"fixed",inset:0,zIndex:600,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={onClose}>
+    <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:4,padding:"16px",boxShadow:"0 4px 20px rgba(0,0,0,0.12)",minWidth:220,maxHeight:320,overflowY:"auto"}} onClick={e=>e.stopPropagation()}>
+      <p style={{margin:"0 0 10px",fontSize:"11px",fontWeight:700,letterSpacing:"0.07em",textTransform:"uppercase",color:T.mid}}>Assign to Project</p>
+      <button onClick={()=>{onSelect(null);onClose();}} style={{display:"flex",alignItems:"center",gap:10,width:"100%",padding:"8px 10px",background:!currentProjectId?T.accentLight:"transparent",border:"none",borderRadius:2,cursor:"pointer",fontFamily:T.sans,marginBottom:4}}>
+        <span style={{fontSize:"13px",color:!currentProjectId?T.accent:T.mid,fontWeight:!currentProjectId?600:400}}>No project</span>
+      </button>
+      {projects.map((p,i)=>(
+        <button key={p.id} onClick={()=>{onSelect(p.id);onClose();}} style={{display:"flex",alignItems:"center",gap:10,width:"100%",padding:"8px 10px",background:currentProjectId===p.id?T.accentLight:"transparent",border:"none",borderRadius:2,cursor:"pointer",fontFamily:T.sans,marginBottom:4}}>
+          <div style={{width:8,height:8,borderRadius:"50%",background:pc(i),flexShrink:0}}/>
+          <span style={{fontSize:"13px",color:T.ink,fontWeight:currentProjectId===p.id?600:400,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name}</span>
+          {currentProjectId===p.id&&<span style={{marginLeft:"auto",fontSize:"11px",color:T.accentMid,flexShrink:0}}>current</span>}
+        </button>
+      ))}
+    </div>
+  </div>
+);
+
+// ─── Pre-meeting Briefing Modal ───────────────────────────────────────────────
 const PreMeetingBriefing = ({project, todos, members, onClose}) => {
   const [briefing, setBriefing] = useState("");
   const [loading, setLoading] = useState(true);
-
   useEffect(()=>{
     const generate = async () => {
       try {
@@ -334,9 +340,8 @@ const PreMeetingBriefing = ({project, todos, members, onClose}) => {
         const openCommitments = (project.commitments||[]).filter(c=>c.status==="open");
         const openDecisions = (project.decisions||[]).slice(-5);
         const activeRisks = (project.risks||[]).filter(r=>!r.dismissed);
-
         const prompt = `You are preparing someone for a meeting on the project "${project.name}". Write a concise pre-meeting briefing. Be direct — no fluff.
-
+${project.context ? `\nProject context: ${project.context}\n` : ""}
 Format exactly:
 ## What happened last time
 [One paragraph summary of the last meeting. If no notes, say "No previous notes."]
@@ -358,28 +363,23 @@ Last meeting notes:
 ${lastNote ? `[${fmt(lastNote.date)}]\n${lastNote.summary}` : "No previous meeting notes."}
 
 Open tasks (${openTasks.length}):
-${openTasks.length > 0 ? openTasks.map(t=>`- ${t.text}${t.dueDate ? ` (due ${fmtShort(t.dueDate)})` : ""}${isOverdue(t.dueDate)?" OVERDUE":""}`).join("\n") : "None"}
+${openTasks.length > 0 ? openTasks.map(t=>`- ${t.text}${t.dueDate?` (due ${fmtShort(t.dueDate)})`:""}`).join("\n") : "None"}
 
 Open commitments (${openCommitments.length}):
-${openCommitments.length > 0 ? openCommitments.map(c=>{const m=members.find(mm=>mm.id===c.member_id); return `- ${m?.name||"Someone"}: ${c.commitment_text}`;}).join("\n") : "None"}
+${openCommitments.length > 0 ? openCommitments.map(c=>{const m=members.find(mm=>mm.id===c.member_id);return `- ${m?.name||"Someone"}: ${c.commitment_text}`;}).join("\n") : "None"}
 
 Recent decisions:
 ${openDecisions.length > 0 ? openDecisions.map(d=>`- ${d.decision_text}`).join("\n") : "None"}
 
 Active risks:
 ${activeRisks.length > 0 ? activeRisks.map(r=>`- [${r.severity}] ${r.risk_text}`).join("\n") : "None"}`;
-
         const result = await claude(prompt, 800);
         setBriefing(result);
-      } catch(e) {
-        setBriefing("Failed to generate briefing. Please try again.");
-      } finally {
-        setLoading(false);
-      }
+      } catch { setBriefing("Failed to generate briefing. Please try again."); }
+      finally { setLoading(false); }
     };
     generate();
   }, []);
-
   return (
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.55)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
       <div style={{background:T.white,borderRadius:4,width:"100%",maxWidth:580,maxHeight:"90vh",overflowY:"auto",fontFamily:T.sans}}>
@@ -400,115 +400,74 @@ ${activeRisks.length > 0 ? activeRisks.map(r=>`- [${r.severity}] ${r.risk_text}`
                 <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
                 <p style={{color:T.muted,fontSize:"13px",margin:0}}>Preparing your briefing…</p>
               </div>
-            : <MD content={briefing}/>
-          }
+            : <MD content={briefing}/>}
         </div>
       </div>
     </div>
   );
 };
 
-// ─── FEATURE 4: Shared Task View (no-login public page) ───────────────────────
+// ─── Shared Task View (public, no login) ──────────────────────────────────────
 const SharedTaskView = ({token}) => {
   const [shareData, setShareData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [todos, setTodos] = useState([]);
   const [toast, setToast] = useState(null);
-
-  useEffect(()=>{
-    db.getShareData(token).then(d=>{
-      if(d){ setShareData(d); setTodos(d.todos); }
-      setLoading(false);
-    });
-  },[token]);
-
-  const toggle = async (id) => {
-    const todo = todos.find(t=>t.id===id);
-    if(!todo) return;
+  useEffect(()=>{ db.getShareData(token).then(d=>{ if(d){ setShareData(d); setTodos(d.todos); } setLoading(false); }); },[token]);
+  const toggle = async id => {
+    const todo = todos.find(t=>t.id===id); if(!todo) return;
     const nowDone = !todo.done;
     await db.toggleSharedTodo(id, nowDone);
     setTodos(ts => ts.map(t=>t.id===id ? {...t,done:nowDone} : t));
     setToast(nowDone ? "Marked done ✓" : "Marked pending");
   };
-
-  if(loading) return (
-    <Shell maxW={500}>
-      <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"60vh"}}>
-        <p style={{color:T.muted}}>Loading…</p>
-      </div>
-    </Shell>
-  );
-
-  if(!shareData) return (
-    <Shell maxW={500}>
-      <div style={{paddingTop:60,textAlign:"center"}}>
-        <Logo/>
-        <p style={{color:T.mid,marginTop:24,fontSize:"14px"}}>This link is invalid or has expired.</p>
-      </div>
-    </Shell>
-  );
-
+  if(loading) return <Shell maxW={500}><div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"60vh"}}><p style={{color:T.muted}}>Loading…</p></div></Shell>;
+  if(!shareData) return <Shell maxW={500}><div style={{paddingTop:60,textAlign:"center"}}><Logo/><p style={{color:T.mid,marginTop:24,fontSize:"14px"}}>This link is invalid or has expired.</p></div></Shell>;
   const {member, projects} = shareData;
   const pending = todos.filter(t=>!t.done);
   const done = todos.filter(t=>t.done);
   const overdue = pending.filter(t=>isOverdue(t.dueDate));
-
   return (
     <Shell maxW={560}>
       {toast&&<Toast message={toast} onDone={()=>setToast(null)}/>}
-      <div style={{marginBottom:24,paddingBottom:14,borderBottom:`1px solid ${T.border}`}}>
-        <Logo/>
-      </div>
+      <div style={{marginBottom:24,paddingBottom:14,borderBottom:`1px solid ${T.border}`}}><Logo/></div>
       <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:20}}>
         <Av name={member.name} size={44}/>
-        <div>
-          <h1 style={{margin:0,fontFamily:T.serif,fontSize:"20px",fontWeight:700,color:T.ink}}>{member.name}</h1>
-          {member.role&&<p style={{margin:"2px 0 0",fontSize:"13px",color:T.mid}}>{member.role}</p>}
-        </div>
+        <div><h1 style={{margin:0,fontFamily:T.serif,fontSize:"20px",fontWeight:700,color:T.ink}}>{member.name}</h1>{member.role&&<p style={{margin:"2px 0 0",fontSize:"13px",color:T.mid}}>{member.role}</p>}</div>
       </div>
-
       {overdue.length>0&&(
         <Card style={{borderLeft:`3px solid ${T.danger}`,marginBottom:10}}>
           <p style={{margin:"0 0 8px",fontSize:"11px",fontWeight:700,letterSpacing:"0.07em",textTransform:"uppercase",color:T.danger}}>Overdue ({overdue.length})</p>
-          {overdue.map(t=>{
-            const proj = projects.find(p=>p.id===t.projectId);
-            return (
-              <div key={t.id} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"8px 0",borderBottom:`1px solid ${T.border}`}}>
-                <input type="checkbox" checked={!!t.done} onChange={()=>toggle(t.id)} style={{marginTop:3,accentColor:T.accent,cursor:"pointer",flexShrink:0}}/>
-                <div style={{flex:1,minWidth:0}}>
-                  <p style={{margin:0,fontSize:"13px",color:T.ink,textDecoration:t.done?"line-through":"none",lineHeight:1.5}}>{t.text}</p>
-                  <div style={{display:"flex",gap:5,marginTop:3,flexWrap:"wrap"}}>
-                    {proj&&<Tag color={T.accentMid}>{proj.name}</Tag>}
-                    <span style={{fontSize:"11px",color:T.danger,fontWeight:600}}>Overdue · {fmtShort(t.dueDate)}</span>
-                  </div>
+          {overdue.map(t=>{ const proj=projects.find(p=>p.id===t.projectId); return (
+            <div key={t.id} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"8px 0",borderBottom:`1px solid ${T.border}`}}>
+              <input type="checkbox" checked={!!t.done} onChange={()=>toggle(t.id)} style={{marginTop:3,accentColor:T.accent,cursor:"pointer",flexShrink:0}}/>
+              <div style={{flex:1,minWidth:0}}>
+                <p style={{margin:0,fontSize:"13px",color:T.ink,lineHeight:1.5}}>{t.text}</p>
+                <div style={{display:"flex",gap:5,marginTop:3,flexWrap:"wrap"}}>
+                  {proj&&<Tag color={T.accentMid}>{proj.name}</Tag>}
+                  <span style={{fontSize:"11px",color:T.danger,fontWeight:600}}>Overdue · {fmtShort(t.dueDate)}</span>
                 </div>
               </div>
-            );
-          })}
+            </div>
+          );})}
         </Card>
       )}
-
       <Card>
         <p style={{margin:"0 0 8px",fontSize:"11px",fontWeight:700,letterSpacing:"0.07em",textTransform:"uppercase",color:T.mid}}>Open Tasks ({pending.filter(t=>!isOverdue(t.dueDate)).length})</p>
-        {pending.filter(t=>!isOverdue(t.dueDate)).length===0
-          ? <p style={{color:T.muted,fontSize:"13px",margin:0}}>No open tasks.</p>
-          : pending.filter(t=>!isOverdue(t.dueDate)).map(t=>{
-              const proj = projects.find(p=>p.id===t.projectId);
-              return (
-                <div key={t.id} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"8px 0",borderBottom:`1px solid ${T.border}`}}>
-                  <input type="checkbox" checked={!!t.done} onChange={()=>toggle(t.id)} style={{marginTop:3,accentColor:T.accent,cursor:"pointer",flexShrink:0}}/>
-                  <div style={{flex:1,minWidth:0}}>
-                    <p style={{margin:0,fontSize:"13px",color:T.ink,lineHeight:1.5}}>{t.text}</p>
-                    <div style={{display:"flex",gap:5,marginTop:3,flexWrap:"wrap"}}>
-                      {proj&&<Tag color={T.accentMid}>{proj.name}</Tag>}
-                      {t.dueDate&&<span style={{fontSize:"11px",color:T.muted}}>{fmtShort(t.dueDate)}</span>}
-                    </div>
-                  </div>
+        {pending.filter(t=>!isOverdue(t.dueDate)).length===0 ? <p style={{color:T.muted,fontSize:"13px",margin:0}}>No open tasks.</p>
+          : pending.filter(t=>!isOverdue(t.dueDate)).map(t=>{ const proj=projects.find(p=>p.id===t.projectId); return (
+            <div key={t.id} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"8px 0",borderBottom:`1px solid ${T.border}`}}>
+              <input type="checkbox" checked={!!t.done} onChange={()=>toggle(t.id)} style={{marginTop:3,accentColor:T.accent,cursor:"pointer",flexShrink:0}}/>
+              <div style={{flex:1,minWidth:0}}>
+                <p style={{margin:0,fontSize:"13px",color:T.ink,lineHeight:1.5}}>{t.text}</p>
+                <div style={{display:"flex",gap:5,marginTop:3,flexWrap:"wrap"}}>
+                  {proj&&<Tag color={T.accentMid}>{proj.name}</Tag>}
+                  {t.dueDate&&<span style={{fontSize:"11px",color:T.muted}}>{fmtShort(t.dueDate)}</span>}
                 </div>
-              );
-            })}
+              </div>
+            </div>
+          );})}
       </Card>
-
       {done.length>0&&(
         <Card style={{marginTop:6}}>
           <p style={{margin:"0 0 8px",fontSize:"11px",fontWeight:700,letterSpacing:"0.07em",textTransform:"uppercase",color:T.muted}}>Completed ({done.length})</p>
@@ -520,133 +479,21 @@ const SharedTaskView = ({token}) => {
           ))}
         </Card>
       )}
-
       <p style={{textAlign:"center",fontSize:"11px",color:T.muted,marginTop:24}}>Powered by Debrief</p>
     </Shell>
   );
 };
 
-// ─── FEATURE 5: Meeting Templates ────────────────────────────────────────────
+// ─── Meeting Templates ────────────────────────────────────────────────────────
 const TEMPLATES = [
-  {
-    id:"standup",
-    label:"Standup",
-    icon:"☀️",
-    structure:`STANDUP – [Date]
-Attendees: 
-
-YESTERDAY:
-- 
-
-TODAY:
-- 
-
-BLOCKERS:
-- 
-
-@[YourName] action items:
-- `,
-  },
-  {
-    id:"client_call",
-    label:"Client Call",
-    icon:"📞",
-    structure:`CLIENT CALL – [Date]
-Client: 
-Attendees: 
-
-AGENDA COVERED:
-- 
-
-KEY DECISIONS:
-- 
-
-CLIENT FEEDBACK:
-- 
-
-NEXT STEPS:
-- @[YourName] to 
-- Client to 
-
-FOLLOW-UP DATE: `,
-  },
-  {
-    id:"sprint_review",
-    label:"Sprint Review",
-    icon:"🔄",
-    structure:`SPRINT REVIEW – [Date]
-Sprint: 
-Attendees: 
-
-COMPLETED:
-- 
-
-NOT COMPLETED (carried over):
-- 
-
-DEMO FEEDBACK:
-- 
-
-RETROSPECTIVE:
-- What went well: 
-- What didn't: 
-- Action: @[YourName] to 
-
-NEXT SPRINT PRIORITIES:
-1. 
-2. 
-3. `,
-  },
-  {
-    id:"one_on_one",
-    label:"1:1",
-    icon:"👥",
-    structure:`1:1 – [Date]
-With: 
-
-THEIR UPDATE:
-- 
-
-CONCERNS / BLOCKERS RAISED:
-- 
-
-FEEDBACK GIVEN:
-- 
-
-COMMITMENTS MADE:
-- [Name] to 
-- [Name] to 
-
-NEXT 1:1: `,
-  },
-  {
-    id:"board_update",
-    label:"Board / Exec",
-    icon:"📊",
-    structure:`BOARD / EXEC UPDATE – [Date]
-Attendees: 
-
-PRESENTED:
-- 
-
-KEY DECISIONS MADE:
-- 
-
-RISKS FLAGGED:
-- 
-
-ASKS / APPROVALS:
-- 
-
-ACTION OWNERS:
-- @[YourName] to 
-- 
-
-NEXT REVIEW: `,
-  },
+  { id:"standup", label:"Standup", icon:"☀️", structure:`STANDUP – [Date]\nAttendees: \n\nYESTERDAY:\n- \n\nTODAY:\n- \n\nBLOCKERS:\n- \n\n@[YourName] action items:\n- ` },
+  { id:"client_call", label:"Client Call", icon:"📞", structure:`CLIENT CALL – [Date]\nClient: \nAttendees: \n\nAGENDA COVERED:\n- \n\nKEY DECISIONS:\n- \n\nCLIENT FEEDBACK:\n- \n\nNEXT STEPS:\n- @[YourName] to \n- Client to \n\nFOLLOW-UP DATE: ` },
+  { id:"sprint_review", label:"Sprint Review", icon:"🔄", structure:`SPRINT REVIEW – [Date]\nSprint: \nAttendees: \n\nCOMPLETED:\n- \n\nNOT COMPLETED (carried over):\n- \n\nDEMO FEEDBACK:\n- \n\nRETROSPECTIVE:\n- What went well: \n- What didn't: \n- Action: @[YourName] to \n\nNEXT SPRINT PRIORITIES:\n1. \n2. \n3. ` },
+  { id:"one_on_one", label:"1:1", icon:"👥", structure:`1:1 – [Date]\nWith: \n\nTHEIR UPDATE:\n- \n\nCONCERNS / BLOCKERS RAISED:\n- \n\nFEEDBACK GIVEN:\n- \n\nCOMMITMENTS MADE:\n- [Name] to \n- [Name] to \n\nNEXT 1:1: ` },
+  { id:"board_update", label:"Board / Exec", icon:"📊", structure:`BOARD / EXEC UPDATE – [Date]\nAttendees: \n\nPRESENTED:\n- \n\nKEY DECISIONS MADE:\n- \n\nRISKS FLAGGED:\n- \n\nASKS / APPROVALS:\n- \n\nACTION OWNERS:\n- @[YourName] to \n- \n\nNEXT REVIEW: ` },
 ];
 
-// ─── Bottom Search / Ask Bar ───────────────────────────────────────────────────
+// ─── Bottom Search Bar ────────────────────────────────────────────────────────
 const BottomSearchBar = ({onClick}) => (
   <div style={{position:"fixed",bottom:16,left:"50%",transform:"translateX(-50%)",zIndex:900,width:"calc(100% - 32px)",maxWidth:500}}>
     <button onClick={onClick} style={{width:"100%",display:"flex",alignItems:"center",gap:10,padding:"11px 18px",background:T.white,border:`1px solid ${T.border}`,borderRadius:24,boxShadow:"0 2px 16px rgba(0,0,0,0.08)",cursor:"pointer",fontFamily:T.sans,color:T.muted,fontSize:"13px"}}>
@@ -659,74 +506,48 @@ const BottomSearchBar = ({onClick}) => (
 
 // ─── Search + Ask Overlay ─────────────────────────────────────────────────────
 const SearchAskOverlay = ({projects,members,todos,onClose,onProjectNav}) => {
-  const [q,setQ]=useState("");
-  const [mode,setMode]=useState("search");
-  const [askAnswer,setAskAnswer]=useState("");
-  const [asking,setAsking]=useState(false);
+  const [q,setQ]=useState(""); const [mode,setMode]=useState("search"); const [askAnswer,setAskAnswer]=useState(""); const [asking,setAsking]=useState(false);
   const inputRef=useRef(null);
   useEffect(()=>{ setTimeout(()=>inputRef.current?.focus(),50); },[]);
-
   const isQuestion = q.trim().endsWith("?")||/^(what|who|when|why|how|which|did|has|show)\b/i.test(q.trim());
-
   const results=useMemo(()=>{
     if(!q.trim()||mode==="ask") return [];
     const ql=q.toLowerCase(),hits=[];
-    for(const p of projects){
-      for(const n of p.notes){
-        if(n.summary?.toLowerCase().includes(ql)||n.raw?.toLowerCase().includes(ql)||p.name.toLowerCase().includes(ql))
-          hits.push({note:n,project:p,projIdx:projects.findIndex(pp=>pp.id===p.id)});
-      }
-    }
+    for(const p of projects) for(const n of p.notes)
+      if(n.summary?.toLowerCase().includes(ql)||n.raw?.toLowerCase().includes(ql)||p.name.toLowerCase().includes(ql))
+        hits.push({note:n,project:p,projIdx:projects.findIndex(pp=>pp.id===p.id)});
     return hits.slice(0,15);
   },[q,projects,mode]);
-
-  const highlight=(text,q)=>{
-    if(!q.trim()) return text.slice(0,120);
-    const idx=text.toLowerCase().indexOf(q.toLowerCase());
-    if(idx===-1) return text.slice(0,120);
-    const start=Math.max(0,idx-40);
-    return (start>0?"…":"")+text.slice(start,start+160)+(start+160<text.length?"…":"");
-  };
-
+  const highlight=(text,q)=>{ if(!q.trim()) return text.slice(0,120); const idx=text.toLowerCase().indexOf(q.toLowerCase()); if(idx===-1) return text.slice(0,120); const start=Math.max(0,idx-40); return (start>0?"…":"")+text.slice(start,start+160)+(start+160<text.length?"…":""); };
   const handleAsk=async()=>{
-    if(!q.trim()) return;
-    setAsking(true);setAskAnswer("");setMode("ask");
+    if(!q.trim()) return; setAsking(true);setAskAnswer("");setMode("ask");
     try{
-      const allNotes=projects.flatMap(p=>p.notes.map(n=>(`[${p.name}] ${fmt(n.date)}:\n${n.summary}`)));
-      const allDecisions=projects.flatMap(p=>(p.decisions||[]).map(d=>(`[${p.name}] Decision: ${d.decision_text}`)));
-      const allCommitments=projects.flatMap(p=>(p.commitments||[]).map(c=>(`[${p.name}] Commitment by ${members.find(m=>m.id===c.member_id)?.name||"someone"}: ${c.commitment_text} (${c.status})`)));
-      const allTasks=todos.map(t=>{const p=projects.find(pp=>pp.id===t.projectId);return `[${p?.name||"No project"}] Task: ${t.text} (${t.done?"done":"pending"})`;});
-      const context=[...allNotes,...allDecisions,...allCommitments,...allTasks].join("\n\n");
-      const answer=await claude(`You are a helpful assistant with access to all the user's meeting notes, decisions, commitments and tasks. Answer the question directly and specifically using the information below. If you can't find the answer, say so clearly.\n\nQuestion: ${q}\n\nContext:\n${context}`,800);
+      const ctx=[
+        ...projects.flatMap(p=>p.notes.map(n=>`[${p.name}] ${fmt(n.date)}:\n${n.summary}`)),
+        ...projects.flatMap(p=>(p.decisions||[]).map(d=>`[${p.name}] Decision: ${d.decision_text}`)),
+        ...projects.flatMap(p=>(p.commitments||[]).map(c=>`[${p.name}] Commitment by ${members.find(m=>m.id===c.member_id)?.name||"someone"}: ${c.commitment_text} (${c.status})`)),
+        ...todos.map(t=>{const p=projects.find(pp=>pp.id===t.projectId);return `[${p?.name||"No project"}] Task: ${t.text} (${t.done?"done":"pending"})`;})
+      ].join("\n\n");
+      const answer=await claude(`You are a helpful assistant with access to all the user's meeting notes, decisions, commitments and tasks. Answer the question directly and specifically. If you can't find the answer, say so.\n\nQuestion: ${q}\n\nContext:\n${ctx}`,800);
       setAskAnswer(answer);
     }catch{setAskAnswer("Sorry, couldn't get an answer. Please try again.");}
     finally{setAsking(false);}
   };
-
   return (
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1000,display:"flex",flexDirection:"column"}} onClick={onClose}>
       <div style={{background:T.white,margin:"20px 16px 0",borderRadius:4,padding:"12px 16px",display:"flex",gap:10,alignItems:"center"}} onClick={e=>e.stopPropagation()}>
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="6" cy="6" r="4.5" stroke={T.muted} strokeWidth="1.5"/><path d="M9.5 9.5L12 12" stroke={T.muted} strokeWidth="1.5" strokeLinecap="round"/></svg>
-        <input ref={inputRef} value={q} onChange={e=>{setQ(e.target.value);setMode("search");setAskAnswer("");}}
-          onKeyDown={e=>e.key==="Enter"&&isQuestion&&handleAsk()}
+        <input ref={inputRef} value={q} onChange={e=>{setQ(e.target.value);setMode("search");setAskAnswer("");}} onKeyDown={e=>e.key==="Enter"&&isQuestion&&handleAsk()}
           placeholder="Search or ask: 'Who owns the API task?' or 'What did we decide about pricing?'"
           style={{flex:1,border:"none",outline:"none",fontSize:"14px",color:T.ink,fontFamily:T.sans,background:"transparent"}}/>
         {isQuestion&&q.trim()&&<button onClick={handleAsk} disabled={asking} style={{padding:"4px 12px",fontSize:"12px",background:T.accent,color:"#fff",border:"none",borderRadius:2,cursor:"pointer",flexShrink:0,fontFamily:T.sans}}>{asking?"Asking…":"Ask AI"}</button>}
         <button onClick={onClose} style={{background:"none",border:"none",color:T.muted,fontSize:18,cursor:"pointer",padding:0}}>✕</button>
       </div>
       <div style={{flex:1,overflowY:"auto",margin:"8px 16px 16px"}} onClick={e=>e.stopPropagation()}>
-        {mode==="ask"&&(
-          <div style={{background:T.white,borderRadius:4,padding:"16px"}}>
-            <p style={{margin:"0 0 8px",fontSize:"11px",fontWeight:700,letterSpacing:"0.06em",color:T.muted,textTransform:"uppercase"}}>AI Answer</p>
-            {asking?<p style={{color:T.mid,fontSize:"14px"}}>Searching your notes…</p>:<MD content={askAnswer} small/>}
-          </div>
-        )}
+        {mode==="ask"&&<div style={{background:T.white,borderRadius:4,padding:"16px"}}><p style={{margin:"0 0 8px",fontSize:"11px",fontWeight:700,letterSpacing:"0.06em",color:T.muted,textTransform:"uppercase"}}>AI Answer</p>{asking?<p style={{color:T.mid,fontSize:"14px"}}>Searching your notes…</p>:<MD content={askAnswer} small/>}</div>}
         {mode==="search"&&results.map((r,i)=>(
           <div key={i} onClick={()=>{onProjectNav(r.projIdx);onClose();}} style={{background:T.white,borderRadius:4,padding:"14px 16px",marginBottom:6,cursor:"pointer",borderLeft:`3px solid ${pc(r.projIdx)}`}}>
-            <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:4,flexWrap:"wrap"}}>
-              <Tag color={pc(r.projIdx)}>{r.project.name}</Tag>
-              <span style={{fontSize:"11px",color:T.muted}}>{fmt(r.note.date)}</span>
-            </div>
+            <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:4,flexWrap:"wrap"}}><Tag color={pc(r.projIdx)}>{r.project.name}</Tag><span style={{fontSize:"11px",color:T.muted}}>{fmt(r.note.date)}</span></div>
             <p style={{margin:0,fontSize:"13px",color:T.mid,lineHeight:1.5,textAlign:"left"}}>{highlight(r.note.summary?.replace(/[#*]/g,"")||r.note.raw||"",q)}</p>
           </div>
         ))}
@@ -734,9 +555,7 @@ const SearchAskOverlay = ({projects,members,todos,onClose,onProjectNav}) => {
         {!q.trim()&&<div style={{background:T.white,borderRadius:4,padding:"20px 16px"}}>
           <p style={{margin:"0 0 12px",fontSize:"11px",fontWeight:700,letterSpacing:"0.06em",color:T.muted,textTransform:"uppercase"}}>Try asking</p>
           {["Who owns the API integration task?","What did we decide about pricing?","Which projects have overdue items?","What has Sarah committed to?","Show me all risks across projects"].map((s,i)=>(
-            <button key={i} onClick={()=>{setQ(s);setTimeout(()=>handleAsk(),100);}} style={{display:"block",width:"100%",textAlign:"left",padding:"8px 0",fontSize:"13px",color:T.accentMid,background:"none",border:"none",borderBottom:`1px solid ${T.border}`,cursor:"pointer",fontFamily:T.sans}}>
-              {s}
-            </button>
+            <button key={i} onClick={()=>{setQ(s);setTimeout(()=>handleAsk(),100);}} style={{display:"block",width:"100%",textAlign:"left",padding:"8px 0",fontSize:"13px",color:T.accentMid,background:"none",border:"none",borderBottom:`1px solid ${T.border}`,cursor:"pointer",fontFamily:T.sans}}>{s}</button>
           ))}
         </div>}
       </div>
@@ -754,7 +573,7 @@ const EditNoteModal = ({note,projectName,onSave,onCancel,saving}) => {
         <h2 style={{margin:"0 0 4px",fontSize:"18px",fontWeight:700,fontFamily:T.serif,color:T.ink}}>Edit Meeting Notes</h2>
         <p style={{margin:"0 0 14px",fontSize:"12px",color:T.muted}}>Saving to: {projectName} · Summary will be regenerated</p>
         <textarea ref={ref} style={{...inp,height:220,resize:"vertical",lineHeight:1.65}}/>
-        {saving&&<p style={{fontSize:"12px",color:T.accentMid,margin:"8px 0 0"}}>Regenerating summary and project status…</p>}
+        {saving&&<p style={{fontSize:"12px",color:T.accentMid,margin:"8px 0 0"}}>Regenerating summary…</p>}
         <div style={{display:"flex",gap:8,marginTop:14}}>
           <Btn onClick={()=>onSave(ref.current?.value||"")} disabled={saving}>{saving?"Saving…":"Save & Regenerate"}</Btn>
           <Btn variant="secondary" onClick={onCancel} disabled={saving}>Cancel</Btn>
@@ -771,87 +590,26 @@ const TOUR_STEPS=[
   {target:"tour-project",title:"Organise by project",body:"Create a project for each client, team, or initiative. Debrief tracks decisions, commitments, risks and tasks — all in one place."},
   {target:"tour-nav",title:"Track your whole team",body:"Go to Team to add colleagues. Tag them in notes and Debrief builds an intelligence profile on each person across all projects."},
 ];
-
 const Tour=({onDone})=>{
-  const [step,setStep]=useState(0);
-  const [pos,setPos]=useState(null);
-  const isMobile=window.innerWidth<600;
+  const [step,setStep]=useState(0); const [pos,setPos]=useState(null); const isMobile=window.innerWidth<600;
   useEffect(()=>{
-    const position=()=>{
-      const el=document.getElementById(TOUR_STEPS[step].target);
-      if(!el)return;
-      const r=el.getBoundingClientRect();
-      setPos({top:r.bottom+10, left:Math.min(r.left, window.innerWidth-280)});
-    };
-    position();
-    window.addEventListener('resize',position);
-    window.addEventListener('scroll',position,true);
-    return()=>{window.removeEventListener('resize',position);window.removeEventListener('scroll',position,true);};
+    const position=()=>{ const el=document.getElementById(TOUR_STEPS[step].target); if(!el)return; const r=el.getBoundingClientRect(); setPos({top:r.bottom+10,left:Math.min(r.left,window.innerWidth-280)}); };
+    position(); window.addEventListener('resize',position); window.addEventListener('scroll',position,true);
+    return()=>{ window.removeEventListener('resize',position); window.removeEventListener('scroll',position,true); };
   },[step]);
-  const next=()=>{if(step<TOUR_STEPS.length-1)setStep(s=>s+1);else onDone();};
-  const prev=()=>{if(step>0)setStep(s=>s-1);};
-  const curr=TOUR_STEPS[step];
-  if(isMobile) return (
-    <>
-      <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:999}} onClick={onDone}/>
-      <div style={{position:"fixed",bottom:0,left:0,right:0,background:"#fff",borderRadius:"16px 16px 0 0",padding:"24px 20px 36px",zIndex:1000,fontFamily:T.sans}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
-          <span style={{fontSize:"11px",fontWeight:700,letterSpacing:"0.07em",color:T.muted,textTransform:"uppercase"}}>Step {step+1} of {TOUR_STEPS.length}</span>
-          <button onClick={onDone} style={{background:"none",border:"none",color:T.muted,fontSize:18,cursor:"pointer",padding:0}}>✕</button>
-        </div>
-        <h3 style={{margin:"0 0 8px",fontSize:"18px",fontWeight:700,fontFamily:T.serif,color:T.ink,textAlign:"left"}}>{curr.title}</h3>
-        <p style={{margin:"0 0 20px",fontSize:"14px",color:T.mid,lineHeight:1.6,textAlign:"left"}}>{curr.body}</p>
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-          <div style={{display:"flex",gap:5}}>{TOUR_STEPS.map((_,i)=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:i===step?T.accent:T.border}}/>)}</div>
-          <div style={{display:"flex",gap:8}}>
-            {step>0&&<button onClick={prev} style={{padding:"8px 16px",fontSize:"13px",border:`1px solid ${T.border}`,borderRadius:4,background:"transparent",color:T.ink,cursor:"pointer"}}>← Back</button>}
-            <button onClick={next} style={{padding:"8px 20px",fontSize:"13px",border:"none",borderRadius:4,background:T.accent,color:"#fff",fontWeight:600,cursor:"pointer"}}>{step===TOUR_STEPS.length-1?"Got it ✓":"Next →"}</button>
-          </div>
-        </div>
-      </div>
-    </>
-  );
-  return (
-    <>
-      <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.25)",zIndex:999}} onClick={onDone}/>
-      {pos&&<div style={{position:"fixed",top:pos.top,left:pos.left,width:260,background:T.accent,color:"#fff",borderRadius:8,padding:"14px 16px",zIndex:1000,fontFamily:T.sans,boxSizing:"border-box"}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
-          <span style={{fontSize:"13px",fontWeight:700}}>{curr.title}</span>
-          <button onClick={onDone} style={{background:"none",border:"none",color:"rgba(255,255,255,0.6)",fontSize:14,cursor:"pointer",padding:0,marginLeft:8,flexShrink:0}}>✕</button>
-        </div>
-        <p style={{margin:"0 0 14px",fontSize:"13px",lineHeight:1.6,color:"rgba(255,255,255,0.85)",textAlign:"left"}}>{curr.body}</p>
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-          <div style={{display:"flex",gap:4}}>{TOUR_STEPS.map((_,i)=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:i===step?"#fff":"rgba(255,255,255,0.35)"}}/>)}</div>
-          <div style={{display:"flex",gap:6}}>
-            {step>0&&<button onClick={prev} style={{padding:"4px 10px",fontSize:"11px",border:"1px solid rgba(255,255,255,0.3)",borderRadius:3,background:"transparent",color:"#fff",cursor:"pointer"}}>← Back</button>}
-            <button onClick={next} style={{padding:"4px 12px",fontSize:"11px",border:"none",borderRadius:3,background:"rgba(255,255,255,0.2)",color:"#fff",fontWeight:600,cursor:"pointer"}}>{step===TOUR_STEPS.length-1?"Got it ✓":"Next →"}</button>
-          </div>
-        </div>
-        <div style={{position:"absolute",top:-6,left:16,width:0,height:0,borderLeft:"6px solid transparent",borderRight:"6px solid transparent",borderBottom:`6px solid ${T.accent}`}}/>
-      </div>}
-    </>
-  );
+  const next=()=>{if(step<TOUR_STEPS.length-1)setStep(s=>s+1);else onDone();}; const prev=()=>{if(step>0)setStep(s=>s-1);}; const curr=TOUR_STEPS[step];
+  if(isMobile) return(<><div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:999}} onClick={onDone}/><div style={{position:"fixed",bottom:0,left:0,right:0,background:"#fff",borderRadius:"16px 16px 0 0",padding:"24px 20px 36px",zIndex:1000,fontFamily:T.sans}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}><span style={{fontSize:"11px",fontWeight:700,letterSpacing:"0.07em",color:T.muted,textTransform:"uppercase"}}>Step {step+1} of {TOUR_STEPS.length}</span><button onClick={onDone} style={{background:"none",border:"none",color:T.muted,fontSize:18,cursor:"pointer",padding:0}}>✕</button></div><h3 style={{margin:"0 0 8px",fontSize:"18px",fontWeight:700,fontFamily:T.serif,color:T.ink,textAlign:"left"}}>{curr.title}</h3><p style={{margin:"0 0 20px",fontSize:"14px",color:T.mid,lineHeight:1.6,textAlign:"left"}}>{curr.body}</p><div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}><div style={{display:"flex",gap:5}}>{TOUR_STEPS.map((_,i)=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:i===step?T.accent:T.border}}/>)}</div><div style={{display:"flex",gap:8}}>{step>0&&<button onClick={prev} style={{padding:"8px 16px",fontSize:"13px",border:`1px solid ${T.border}`,borderRadius:4,background:"transparent",color:T.ink,cursor:"pointer"}}>← Back</button>}<button onClick={next} style={{padding:"8px 20px",fontSize:"13px",border:"none",borderRadius:4,background:T.accent,color:"#fff",fontWeight:600,cursor:"pointer"}}>{step===TOUR_STEPS.length-1?"Got it ✓":"Next →"}</button></div></div></div></>);
+  return(<><div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.25)",zIndex:999}} onClick={onDone}/>{pos&&<div style={{position:"fixed",top:pos.top,left:pos.left,width:260,background:T.accent,color:"#fff",borderRadius:8,padding:"14px 16px",zIndex:1000,fontFamily:T.sans,boxSizing:"border-box"}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}><span style={{fontSize:"13px",fontWeight:700}}>{curr.title}</span><button onClick={onDone} style={{background:"none",border:"none",color:"rgba(255,255,255,0.6)",fontSize:14,cursor:"pointer",padding:0,marginLeft:8,flexShrink:0}}>✕</button></div><p style={{margin:"0 0 14px",fontSize:"13px",lineHeight:1.6,color:"rgba(255,255,255,0.85)",textAlign:"left"}}>{curr.body}</p><div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}><div style={{display:"flex",gap:4}}>{TOUR_STEPS.map((_,i)=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:i===step?"#fff":"rgba(255,255,255,0.35)"}}/>)}</div><div style={{display:"flex",gap:6}}>{step>0&&<button onClick={prev} style={{padding:"4px 10px",fontSize:"11px",border:"1px solid rgba(255,255,255,0.3)",borderRadius:3,background:"transparent",color:"#fff",cursor:"pointer"}}>← Back</button>}<button onClick={next} style={{padding:"4px 12px",fontSize:"11px",border:"none",borderRadius:3,background:"rgba(255,255,255,0.2)",color:"#fff",fontWeight:600,cursor:"pointer"}}>{step===TOUR_STEPS.length-1?"Got it ✓":"Next →"}</button></div></div><div style={{position:"absolute",top:-6,left:16,width:0,height:0,borderLeft:"6px solid transparent",borderRight:"6px solid transparent",borderBottom:`6px solid ${T.accent}`}}/></div>}</>);
 };
 
-// ─── Note Textarea (FEATURE 5: templates added) ───────────────────────────────
+// ─── Note Textarea ────────────────────────────────────────────────────────────
 const NoteTextarea=({onSubmit,onCancel,loading,error,projectName,meName,members})=>{
-  const ref=useRef(null);
-  const [show,setShow]=useState(false);
-  const [q,setQ]=useState("");
-  const [dropPos,setDropPos]=useState(0);
-  const [showTemplates,setShowTemplates]=useState(false);
+  const ref=useRef(null); const [show,setShow]=useState(false); const [q,setQ]=useState(""); const [dropPos,setDropPos]=useState(0);
   const all=useMemo(()=>[{id:"me",name:meName,isSelf:true},...members.map(m=>({...m,isSelf:false}))],[meName,members]);
   const filtered=all.filter(m=>m.name.toLowerCase().includes(q.toLowerCase()));
   const handleChange=e=>{const val=e.target.value,cur=e.target.selectionStart,before=val.slice(0,cur);const match=before.match(/@([\w][\w ]*)$/);if(match){setQ(match[1]);setShow(true);setDropPos(cur-match[0].length);}else setShow(false);};
   const insert=name=>{const ta=ref.current,val=ta.value,before=val.slice(0,dropPos),rest=val.slice(dropPos).replace(/^@[\w ]*/,"");ta.value=before+`@${name}`+(rest.startsWith(" ")?rest:" "+rest);setShow(false);ta.focus();};
-
-  const applyTemplate = (tmpl) => {
-    // Replace [YourName] placeholder with actual name
-    ref.current.value = tmpl.structure.replace(/\[YourName\]/g, meName);
-    setShowTemplates(false);
-    ref.current.focus();
-  };
-
+  const applyTemplate=tmpl=>{ ref.current.value=tmpl.structure.replace(/\[YourName\]/g,meName); ref.current.focus(); };
   return (
     <Card>
       <div style={{marginBottom:14}}>
@@ -859,33 +617,22 @@ const NoteTextarea=({onSubmit,onCancel,loading,error,projectName,meName,members}
         <p style={{margin:"2px 0 0",fontSize:"12px",color:T.muted}}>Saving to: {projectName}</p>
       </div>
       <p style={{fontSize:"12px",color:T.muted,margin:"0 0 8px"}}>Type @ to tag people. Decisions, commitments and risks will be auto-extracted.</p>
-
-      {/* FEATURE 5: Template picker row */}
       <div style={{marginBottom:10}}>
         <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
           <span style={{fontSize:"11px",color:T.muted,fontWeight:600,letterSpacing:"0.05em",textTransform:"uppercase"}}>Template:</span>
           {TEMPLATES.map(tmpl=>(
-            <button key={tmpl.id} onClick={()=>applyTemplate(tmpl)}
-              style={{padding:"3px 10px",fontSize:"11px",border:`1px solid ${T.border}`,borderRadius:2,background:"transparent",color:T.mid,cursor:"pointer",fontFamily:T.sans,display:"flex",alignItems:"center",gap:4}}>
+            <button key={tmpl.id} onClick={()=>applyTemplate(tmpl)} style={{padding:"3px 10px",fontSize:"11px",border:`1px solid ${T.border}`,borderRadius:2,background:"transparent",color:T.mid,cursor:"pointer",fontFamily:T.sans,display:"flex",alignItems:"center",gap:4}}>
               <span>{tmpl.icon}</span>{tmpl.label}
             </button>
           ))}
-          <button onClick={()=>{ref.current.value="";ref.current.focus();}}
-            style={{padding:"3px 10px",fontSize:"11px",border:`1px solid ${T.border}`,borderRadius:2,background:"transparent",color:T.muted,cursor:"pointer",fontFamily:T.sans}}>
-            Clear
-          </button>
+          <button onClick={()=>{ref.current.value="";ref.current.focus();}} style={{padding:"3px 10px",fontSize:"11px",border:`1px solid ${T.border}`,borderRadius:2,background:"transparent",color:T.muted,cursor:"pointer",fontFamily:T.sans}}>Clear</button>
         </div>
       </div>
-
       <div style={{position:"relative"}}>
         <textarea ref={ref} onChange={handleChange} placeholder="Paste raw notes, transcript, or pick a template above…" style={{...inp,height:200,resize:"vertical",lineHeight:1.65}}/>
         {show&&filtered.length>0&&(
           <div style={{position:"absolute",top:"100%",left:0,right:0,background:T.white,border:`1px solid ${T.border}`,borderRadius:2,boxShadow:"0 4px 12px rgba(0,0,0,0.08)",zIndex:20}}>
-            {filtered.map(m=>(
-              <div key={m.id} onMouseDown={e=>{e.preventDefault();insert(m.name);}} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",cursor:"pointer",fontSize:"13px",color:T.ink,borderBottom:`1px solid ${T.border}`}}>
-                <Av name={m.name} size={20} isSelf={m.isSelf}/>{m.name}{m.isSelf&&" (you)"}
-              </div>
-            ))}
+            {filtered.map(m=>(<div key={m.id} onMouseDown={e=>{e.preventDefault();insert(m.name);}} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",cursor:"pointer",fontSize:"13px",color:T.ink,borderBottom:`1px solid ${T.border}`}}><Av name={m.name} size={20} isSelf={m.isSelf}/>{m.name}{m.isSelf&&" (you)"}</div>))}
           </div>
         )}
       </div>
@@ -898,8 +645,8 @@ const NoteTextarea=({onSubmit,onCancel,loading,error,projectName,meName,members}
   );
 };
 
-// ─── Todo Item ────────────────────────────────────────────────────────────────
-const TodoItem=({todo,projects,members,onToggle,onDelete,onProjectNav})=>{
+// ─── Todo Item (FIX #3: project tag click opens reassign picker) ──────────────
+const TodoItem=({todo,projects,members,onToggle,onDelete,onProjectNav,onReassignProject})=>{
   const proj=todo.projectId?projects.find(p=>p.id===todo.projectId):null;
   const projIdx=proj?projects.findIndex(p=>p.id===todo.projectId):-1;
   const assignedMember=todo.memberId?members.find(m=>m.id===todo.memberId):null;
@@ -910,7 +657,11 @@ const TodoItem=({todo,projects,members,onToggle,onDelete,onProjectNav})=>{
       <div style={{flex:1,minWidth:0}}>
         <p style={{margin:0,fontSize:"13px",color:T.ink,textDecoration:todo.done?"line-through":"none",lineHeight:1.5,wordBreak:"break-word"}}>{todo.text}</p>
         <div style={{display:"flex",gap:5,marginTop:3,flexWrap:"wrap",alignItems:"center"}}>
-          {proj&&<Tag color={pc(projIdx)} onClick={()=>onProjectNav&&onProjectNav(projIdx)}>{proj.name}</Tag>}
+          {/* FIX #3: clicking project tag opens reassign picker */}
+          {proj
+            ? <Tag color={pc(projIdx)} onClick={e=>{e.stopPropagation();onReassignProject&&onReassignProject(todo.id,todo.projectId);}}>{proj.name} ✎</Tag>
+            : <span onClick={e=>{e.stopPropagation();onReassignProject&&onReassignProject(todo.id,null);}} style={{fontSize:"11px",color:T.muted,cursor:"pointer",borderBottom:`1px dashed ${T.border}`,paddingBottom:1}}>+ assign project</span>
+          }
           {assignedMember&&<Tag color={avatarBg(assignedMember.name)}>{assignedMember.name}</Tag>}
           {todo.dueDate&&<span style={{fontSize:"11px",color:overdue?T.danger:T.muted,fontWeight:overdue?600:400}}>{overdue?"Overdue · ":""}{fmtShort(todo.dueDate)}</span>}
           {todo.source==="ai"&&<span style={{fontSize:"10px",color:T.muted,letterSpacing:"0.05em"}}>AUTO</span>}
@@ -921,15 +672,31 @@ const TodoItem=({todo,projects,members,onToggle,onDelete,onProjectNav})=>{
   );
 };
 
+// ─── Inline Add Task (FIX #2: inside project view) ───────────────────────────
+const InlineAddTask=({projectId,userId,members,onAdd})=>{
+  const [text,setText]=useState(""); const [due,setDue]=useState(""); const [memberId,setMemberId]=useState(""); const [open,setOpen]=useState(false);
+  const submit=async()=>{
+    if(!text.trim()) return;
+    const t=await db.createTodo(userId,{text:text.trim(),dueDate:due||null,projectId,source:'manual',memberId:memberId||null});
+    onAdd(t); setText(""); setDue(""); setMemberId(""); setOpen(false);
+  };
+  if(!open) return <button onClick={()=>setOpen(true)} style={{display:"flex",alignItems:"center",gap:6,padding:"7px 0",fontSize:"13px",color:T.accentMid,background:"none",border:"none",cursor:"pointer",fontFamily:T.sans}}>+ Add task to this project</button>;
+  return (
+    <div style={{background:T.accentLight,border:`1px solid ${T.accent}20`,borderRadius:2,padding:"12px",marginBottom:10}}>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-end"}}>
+        <div style={{flex:"1 1 160px"}}><input value={text} onChange={e=>setText(e.target.value)} placeholder="Task description…" onKeyDown={e=>e.key==="Enter"&&submit()} style={inp} autoFocus/></div>
+        <div style={{flex:"0 0 auto"}}><input type="date" value={due} onChange={e=>setDue(e.target.value)} style={{...inp,width:"auto"}}/></div>
+        {members.length>0&&<div style={{flex:"1 1 120px"}}><select value={memberId} onChange={e=>setMemberId(e.target.value)} style={{...inp}}><option value="">Assign to…</option>{members.map(m=><option key={m.id} value={m.id}>{m.name}</option>)}</select></div>}
+        <Btn onClick={submit} disabled={!text.trim()}>Add</Btn>
+        <Btn variant="secondary" onClick={()=>setOpen(false)}>Cancel</Btn>
+      </div>
+    </div>
+  );
+};
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
-  // FEATURE 4: detect share token from URL query param
-  const shareToken = useMemo(()=>{
-    const p = new URLSearchParams(window.location.search);
-    return p.get("share") || null;
-  },[]);
-
-  // If this is a shared link, render the public view immediately — no auth needed
+  const shareToken = useMemo(()=>{ const p=new URLSearchParams(window.location.search); return p.get("share")||null; },[]);
   if(shareToken) return <SharedTaskView token={shareToken}/>;
 
   const [userId,setUserId]=useState(null);
@@ -944,9 +711,15 @@ export default function App() {
   const [loading,setLoading]=useState(false);
   const [homeLoading,setHomeLoading]=useState(false);
   const [memberLoading,setMemberLoading]=useState(false);
+  const [riskLoading,setRiskLoading]=useState(false);
   const [error,setError]=useState("");
   const [expandedNote,setExpandedNote]=useState(null);
   const [newProjName,setNewProjName]=useState("");
+  // FIX #7: new project context field
+  const [newProjContext,setNewProjContext]=useState("");
+  // FIX #7: edit context on project page
+  const [editingContext,setEditingContext]=useState(false);
+  const [contextDraft,setContextDraft]=useState("");
   const [newMemberName,setNewMemberName]=useState("");
   const [newMemberRole,setNewMemberRole]=useState("");
   const [meName,setMeName]=useState("");
@@ -958,28 +731,28 @@ export default function App() {
   const [notePhase,setNotePhase]=useState("input");
   const [newTodoText,setNewTodoText]=useState("");
   const [newTodoDue,setNewTodoDue]=useState("");
-  const [newTodoProjectId,setNewTodoProjectId]=useState("");
+  const [newTodoProjectId,setNewTodoProjectId]=useState("__none__");
   const [newTodoMemberId,setNewTodoMemberId]=useState("");
   const [todoFilter,setTodoFilter]=useState("pending");
   const [activeProjectTab,setActiveProjectTab]=useState("notes");
   const [toast,setToast]=useState(null);
-  // FEATURE 1: RAG picker state
   const [ragPickerProjectId,setRagPickerProjectId]=useState(null);
-  // FEATURE 2: briefing modal state
   const [showBriefing,setShowBriefing]=useState(false);
+  // FIX #3: project reassign picker
+  const [reassignTodo,setReassignTodo]=useState(null); // {id, currentProjectId}
+  // FIX #5: show all toggles
+  const [showAllRisks,setShowAllRisks]=useState(false);
+  const [showAllProjects,setShowAllProjects]=useState(false);
 
   const taggedMembersRef=useRef([]);
   const taggedSelfRef=useRef(false);
 
   useEffect(()=>{
-    db.getUser().then(user=>{
-      if(user){setUserId(user.id);db.loadAll(user.id).then(d=>{setData(d);if(d.me)setMeName(d.me);if(d.me&&!d.tourDone)setShowTour(true);});}
-    });
+    db.getUser().then(user=>{ if(user){ setUserId(user.id); db.loadAll(user.id).then(d=>{ setData(d); if(d.me)setMeName(d.me); if(d.me&&!d.tourDone)setShowTour(true); }); } });
   },[]);
-
   useEffect(()=>{
-    const handler=e=>{if(e.key==="k"&&(e.metaKey||e.ctrlKey)){e.preventDefault();setShowSearch(s=>!s);}};
-    window.addEventListener("keydown",handler);return()=>window.removeEventListener("keydown",handler);
+    const h=e=>{ if(e.key==="k"&&(e.metaKey||e.ctrlKey)){e.preventDefault();setShowSearch(s=>!s);} };
+    window.addEventListener("keydown",h); return()=>window.removeEventListener("keydown",h);
   },[]);
 
   const projects=data?.projects||[];
@@ -990,86 +763,82 @@ export default function App() {
   const activeMember=activeMemberId?members.find(m=>m.id===activeMemberId):null;
   const undismissedRisks=allRisks.filter(r=>!r.dismissed);
 
-  const reload=async()=>{if(!userId)return null;const d=await db.loadAll(userId);setData(d);return d;};
+  const reload=async()=>{ if(!userId)return null; const d=await db.loadAll(userId); setData(d); return d; };
   const meInNotes=text=>data?.me&&text.toLowerCase().includes(data.me.toLowerCase());
   const extractMentions=text=>members.filter(m=>text.toLowerCase().includes(m.name.toLowerCase())||text.includes(`@${m.name}`));
 
-  const saveMe=async()=>{if(!meName.trim()||!userId)return;await db.setName(userId,meName.trim());setData(d=>({...d,me:meName.trim()}));setShowTour(true);};
-  const handleTourDone=async()=>{setShowTour(false);if(userId)await db.completeTour(userId);};
-  const signOut=async()=>{await supabase.auth.signOut();window.location.reload();};
+  const saveMe=async()=>{ if(!meName.trim()||!userId)return; await db.setName(userId,meName.trim()); setData(d=>({...d,me:meName.trim()})); setShowTour(true); };
+  const handleTourDone=async()=>{ setShowTour(false); if(userId)await db.completeTour(userId); };
+  const signOut=async()=>{ await supabase.auth.signOut(); window.location.reload(); };
 
-  // FEATURE 1: AI suggests RAG on every note save
+  // FIX #7: project context prepended to all AI calls for that project
+  const projCtxPrefix = proj => proj?.context ? `Project background: ${proj.context}\n\n` : "";
+
+  // RAG suggestion (non-override, skips if user override active)
   const suggestRag = async (projectId, proj) => {
     try {
-      // Don't overwrite a user override
       if(proj.ragOverride) return;
-      const openTasks = todos.filter(t=>!t.done && t.projectId===projectId);
-      const overdueTasks = openTasks.filter(t=>isOverdue(t.dueDate));
-      const activeRisks = (proj.risks||[]).filter(r=>!r.dismissed);
-      const highRisks = activeRisks.filter(r=>r.severity==="high");
-      const openCommitments = (proj.commitments||[]).filter(c=>c.status==="open");
-      const lastNote = [...(proj.notes||[])].sort((a,b)=>new Date(b.date)-new Date(a.date))[0];
-      const daysSinceLastNote = lastNote ? Math.floor((Date.now()-new Date(lastNote.date))/(1000*60*60*24)) : 999;
+      const openTasks=todos.filter(t=>!t.done&&t.projectId===projectId);
+      const overdueTasks=openTasks.filter(t=>isOverdue(t.dueDate));
+      const activeRisks=(proj.risks||[]).filter(r=>!r.dismissed);
+      const highRisks=activeRisks.filter(r=>r.severity==="high");
+      const lastNote=[...(proj.notes||[])].sort((a,b)=>new Date(b.date)-new Date(a.date))[0];
+      const daysSince=lastNote?Math.floor((Date.now()-new Date(lastNote.date))/(1000*60*60*24)):999;
+      const raw=await claude(`Suggest a health status for this project: return ONLY one word: "red", "amber", or "green".\nRed = in trouble (high risks, many overdue, stale 30+ days). Amber = needs attention (some overdue, medium risks, stale 14+ days). Green = on track.\n\nProject: ${proj.name}\nDays since last note: ${daysSince}\nOpen tasks: ${openTasks.length} (${overdueTasks.length} overdue)\nHigh severity risks: ${highRisks.length}\nActive risks: ${activeRisks.length}\nStatus: ${proj.status?proj.status.slice(0,200):"none"}`,10);
+      const rag=raw.trim().toLowerCase().replace(/[^a-z]/g,"");
+      if(["red","amber","green"].includes(rag)) await db.updateProjectRag(projectId,rag,false);
+    } catch {}
+  };
 
-      const raw = await claude(`Based on this project data, suggest a health status: "red", "amber", or "green". Return ONLY the single word, nothing else.
+  // FIX #6: re-evaluate risks — wipe old, insert only high-impact fresh ones
+  const reevaluateRisks = async (projectId, proj, userId) => {
+    try {
+      const allNotes = (proj.notes||[]).map((n,i)=>`Meeting ${i+1} [${fmt(n.date)}]:\n${n.summary}`).join("\n\n");
+      const openCommitments = (proj.commitments||[]).filter(c=>c.status==="open").map(c=>c.commitment_text).join(", ");
+      const openTasks = todos.filter(t=>!t.done&&t.projectId===projectId).map(t=>t.text).join(", ");
+      const raw = await claude(`${projCtxPrefix(proj)}Analyse this project and identify ONLY serious, high-impact risks. Do NOT flag minor or routine concerns. Only flag things that could genuinely derail the project, cause major delays, damage relationships, or result in significant failure.
 
-Rules:
-- red = project is in trouble (multiple high risks, many overdue tasks, stale for 30+ days, critical blockers)
-- amber = needs attention (some overdue tasks, medium risks, open commitments, stale 14+ days)
-- green = on track (tasks current, no major risks, recent activity)
+Return ONLY valid JSON array (max 5 items), no other text:
+[{"text": "specific risk description", "severity": "high|medium"}]
+
+Only include severity "high" or "medium". Do NOT include "low" risks.
+If there are no serious risks, return [].
 
 Project: ${proj.name}
-Days since last meeting note: ${daysSinceLastNote}
-Open tasks: ${openTasks.length} (${overdueTasks.length} overdue)
-High severity risks: ${highRisks.length}
-Total active risks: ${activeRisks.length}
-Open commitments: ${openCommitments.length}
-Recent status: ${proj.status ? proj.status.slice(0,300) : "No status yet"}`, 10);
+${proj.status ? `Current status: ${proj.status.slice(0,400)}` : ""}
+Open tasks: ${openTasks||"none"}
+Open commitments: ${openCommitments||"none"}
 
-      const rag = raw.trim().toLowerCase().replace(/[^a-z]/g,"");
-      if(["red","amber","green"].includes(rag)){
-        await db.updateProjectRag(projectId, rag, false);
-      }
-    } catch(e) { /* silent — RAG suggestion is non-critical */ }
+Meeting notes:
+${allNotes||"No notes yet."}`, 400);
+      const risks = parseJsonSafe(raw);
+      if(Array.isArray(risks)) await db.replaceRisks(userId, projectId, risks);
+    } catch {}
   };
 
-  // FEATURE 4: generate share link for a member
-  const generateShareLink = async (memberId) => {
-    if(!userId) return;
-    const token = await db.createShareToken(userId, memberId);
-    const url = `${window.location.origin}${window.location.pathname}?share=${token}`;
-    try {
-      await navigator.clipboard.writeText(url);
-      setToast("Share link copied to clipboard");
-    } catch {
-      setToast("Share link: " + url);
-    }
-  };
-
-  const extractIntelligence=async(summary,noteId,projectId,projName,existingNotes)=>{
+  const extractIntelligence=async(summary,noteId,projectId,projName,existingNotes,proj)=>{
     try{
       const priorContext=existingNotes.slice(-5).map(n=>n.summary).join("\n\n");
-      const raw=await claude(`Analyse this meeting summary and extract structured intelligence. Return ONLY valid JSON, no other text.
+      const raw=await claude(`${projCtxPrefix(proj)}Analyse this meeting summary and extract structured intelligence. Return ONLY valid JSON, no other text.
 
 {
   "decisions": [{"decision": "what was decided", "context": "why or by whom"}],
   "commitments": [{"person": "name or 'unclear'", "commitment": "what they committed to"}],
-  "risks": [{"text": "risk description", "severity": "high|medium|low"}],
   "quality": {"score": 1-10, "feedback": "one sentence", "breakdown": {"had_decisions": true/false, "had_action_owners": true/false, "had_clear_outcomes": true/false}},
   "contradictions": ["description of any contradiction with prior context if found, else empty array"]
 }
 
-Prior context from earlier meetings in this project:
+Prior context from earlier meetings:
 ${priorContext||"None"}
 
 Current meeting summary:
-${summary}`,600);
-      return parseJsonSafe(raw)||{decisions:[],commitments:[],risks:[],quality:null,contradictions:[]};
-    }catch{return{decisions:[],commitments:[],risks:[],quality:null,contradictions:[]};}
+${summary}`,500);
+      return parseJsonSafe(raw)||{decisions:[],commitments:[],quality:null,contradictions:[]};
+    }catch{return{decisions:[],commitments:[],quality:null,contradictions:[]};}
   };
 
   const generateHomeSummary=async()=>{
-    if(!userId)return;setHomeLoading(true);
+    if(!userId)return; setHomeLoading(true);
     try{
       const d=await db.loadAll(userId);
       const projectContext=d.projects.map(p=>{
@@ -1077,47 +846,21 @@ ${summary}`,600);
         const doneTasks=(d.todos||[]).filter(t=>t.done&&t.projectId===p.id);
         const openCommitments=(p.commitments||[]).filter(c=>c.status==="open");
         const pRisks=(p.risks||[]).filter(r=>!r.dismissed);
-        return `### ${p.name}
-Status: ${p.status||"No status yet"}
-Open tasks (${openTasks.length}): ${openTasks.length>0?openTasks.map(t=>`- ${t.text}${t.dueDate?` (due ${fmtShort(t.dueDate)})`:""}${isOverdue(t.dueDate)?" OVERDUE":""}`).join("\n"):"none"}
-Completed: ${doneTasks.length>0?doneTasks.map(t=>`- ${t.text}`).join(", "):"none"}
-Open commitments: ${openCommitments.length>0?openCommitments.map(c=>`- ${c.commitment_text}`).join("\n"):"none"}
-Risks: ${pRisks.length>0?pRisks.map(r=>`[${r.severity}] ${r.risk_text}`).join("\n"):"none"}
-Recent notes: ${p.notes.slice(-2).map(n=>`[${fmt(n.date)}] ${n.summary.slice(0,200)}`).join(" | ")||"none"}`;
+        return `### ${p.name}\nStatus: ${p.status||"No status yet"}\nOpen tasks (${openTasks.length}): ${openTasks.length>0?openTasks.map(t=>`- ${t.text}${t.dueDate?` (due ${fmtShort(t.dueDate)})`:""}${isOverdue(t.dueDate)?" OVERDUE":""}`).join("\n"):"none"}\nCompleted: ${doneTasks.length>0?doneTasks.map(t=>`- ${t.text}`).join(", "):"none"}\nOpen commitments: ${openCommitments.length>0?openCommitments.map(c=>`- ${c.commitment_text}`).join("\n"):"none"}\nRisks: ${pRisks.length>0?pRisks.map(r=>`[${r.severity}] ${r.risk_text}`).join("\n"):"none"}`;
       }).join("\n\n");
       const standaloneTasks=(d.todos||[]).filter(t=>!t.projectId);
-      const standaloneContext=standaloneTasks.length>0?standaloneTasks.map(t=>`- [${t.done?"DONE":"PENDING"}] ${t.text}${t.dueDate?` (due ${fmtShort(t.dueDate)})`:""}${!t.done&&isOverdue(t.dueDate)?" OVERDUE":""}`).join("\n"):"none";
-      const prompt=`You are writing a weekly executive briefing for ${d.me||"the user"}. Be specific and direct. Use their actual project and task names. No filler.
-
-ALL PROJECTS:
-${projectContext||"No projects yet."}
-
-STANDALONE TASKS (no project):
-${standaloneContext}
-
-Write in exactly this format:
-
-## Projects
-For each project with notes or tasks, write:
-### [Project Name]
-One sentence on current status. Then bullet list of open tasks (mark OVERDUE). Include any open commitments and risks. Skip projects with nothing.
-
-## Standalone Tasks
-Bullet list of tasks not tied to any project. If none write "None."
-
-## Next Week
-3-5 specific prioritised actions using actual task and project names.`;
-      const summary=await claude(prompt,1000);
-      await db.upsertHomeSummary(userId,summary);await reload();
+      const summary=await claude(`You are writing a weekly executive briefing for ${d.me||"the user"}. Be specific and direct. No filler.\n\nALL PROJECTS:\n${projectContext||"No projects yet."}\n\nSTANDALONE TASKS:\n${standaloneTasks.length>0?standaloneTasks.map(t=>`- [${t.done?"DONE":"PENDING"}] ${t.text}`).join("\n"):"none"}\n\nWrite:\n## Projects\nFor each project: one sentence status, bullet open tasks (mark OVERDUE), open commitments, risks. Skip empty projects.\n## Standalone Tasks\nBullet list or "None."\n## Next Week\n3-5 specific prioritised actions.`,1000);
+      await db.upsertHomeSummary(userId,summary); await reload();
     }catch(e){console.error(e);}finally{setHomeLoading(false);}
   };
 
+  // FIX #4: addTodo — explicit __none__ sentinel so "No project" actually saves null
   const addTodo=async()=>{
     if(!newTodoText.trim()||!userId)return;
-    const assignedProjectId=newTodoProjectId||(activeIdx!==null?activeProject?.id:null);
-    const t=await db.createTodo(userId,{text:newTodoText.trim(),dueDate:newTodoDue||null,projectId:assignedProjectId||null,source:'manual',memberId:newTodoMemberId||null});
+    const assignedProjectId = newTodoProjectId==="__none__" ? null : (newTodoProjectId||null);
+    const t=await db.createTodo(userId,{text:newTodoText.trim(),dueDate:newTodoDue||null,projectId:assignedProjectId,source:'manual',memberId:newTodoMemberId||null});
     setData(d=>({...d,todos:[...d.todos,t]}));
-    setNewTodoText("");setNewTodoDue("");setNewTodoProjectId("");setNewTodoMemberId("");
+    setNewTodoText(""); setNewTodoDue(""); setNewTodoProjectId("__none__"); setNewTodoMemberId("");
   };
 
   const extractTodosFromNote=async(summary,projectId)=>{
@@ -1133,47 +876,66 @@ Bullet list of tasks not tied to any project. If none write "None."
   };
 
   const toggleTodo=async id=>{
-    const todo=todos.find(t=>t.id===id);if(!todo)return;
+    const todo=todos.find(t=>t.id===id); if(!todo)return;
     const nowDone=!todo.done;
     await db.toggleTodo(id,nowDone);
     setData(d=>({...d,todos:d.todos.map(t=>t.id===id?{...t,done:nowDone}:t)}));
     if(nowDone&&todo.projectId){
       const pIdx=projects.findIndex(p=>p.id===todo.projectId);
       if(pIdx>=0&&projects[pIdx].notes.length>0){
-        try{const s=await claude(`Latest status for "${projects[pIdx].name}". Note: "${todo.text}" just completed.\n${projects[pIdx].notes.map((n,i)=>`Meeting ${i+1}:\n${n.summary}`).join("\n\n")}`,700);await db.updateProjectStatus(todo.projectId,s);await reload();}catch{}
+        try{ const s=await claude(`${projCtxPrefix(projects[pIdx])}Latest status for "${projects[pIdx].name}". Task completed: "${todo.text}".\n${projects[pIdx].notes.map((n,i)=>`Meeting ${i+1}:\n${n.summary}`).join("\n\n")}`,700); await db.updateProjectStatus(todo.projectId,s); await reload(); }catch{}
       }
     }
   };
 
-  const deleteTodo=async id=>{await db.deleteTodo(id);setData(d=>({...d,todos:d.todos.filter(t=>t.id!==id)}));};
-  const addMember=async()=>{if(!newMemberName.trim()||!userId)return;const m=await db.createMember(userId,{name:newMemberName.trim(),role:newMemberRole.trim()});setData(d=>({...d,members:[...d.members,m]}));setNewMemberName("");setNewMemberRole("");};
-  const deleteMember=async id=>{await db.deleteMember(id);setData(d=>({...d,members:d.members.filter(m=>m.id!==id)}));};
+  const deleteTodo=async id=>{ await db.deleteTodo(id); setData(d=>({...d,todos:d.todos.filter(t=>t.id!==id)})); };
+
+  // FIX #3: reassign todo project
+  const handleReassignProject=async(todoId, newProjectId)=>{
+    await db.updateTodoProject(todoId, newProjectId);
+    setData(d=>({...d,todos:d.todos.map(t=>t.id===todoId?{...t,projectId:newProjectId}:t)}));
+    setReassignTodo(null);
+  };
+
+  const addMember=async()=>{ if(!newMemberName.trim()||!userId)return; const m=await db.createMember(userId,{name:newMemberName.trim(),role:newMemberRole.trim()}); setData(d=>({...d,members:[...d.members,m]})); setNewMemberName(""); setNewMemberRole(""); };
+  const deleteMember=async id=>{ await db.deleteMember(id); setData(d=>({...d,members:d.members.filter(m=>m.id!==id)})); };
 
   const generateMemberSummary=async memberId=>{
     setMemberLoading(true);
     try{
-      const member=members.find(m=>m.id===memberId);if(!member)return;
+      const member=members.find(m=>m.id===memberId); if(!member)return;
       const mentions=[];
       for(const p of projects) for(const n of p.notes) if(n.raw.toLowerCase().includes(member.name.toLowerCase())||n.taggedMembers?.includes(member.id)) mentions.push({project:p.name,date:n.date,summary:n.summary});
       const allCommitments=projects.flatMap(p=>(p.commitments||[]).filter(c=>c.member_id===memberId));
       const summary=mentions.length===0?"No notes mention this person yet.":await claude(`Summarise ${member.name}'s activity across all projects.\n\nMeeting appearances:\n${mentions.map(m=>`[${m.project}] ${fmt(m.date)}:\n${m.summary}`).join("\n\n---\n\n")}\n\nCommitments (${allCommitments.length}):\n${allCommitments.map(c=>`- [${c.status}] ${c.commitment_text}`).join("\n")||"none"}`,900);
-      const intelligence=mentions.length>0?await claude(`Based on these meeting notes, build a stakeholder intelligence profile for ${member.name}. Cover: what they care about most, how they communicate, what they tend to push back on, their reliability on commitments, and how to work with them effectively. Be specific and concise.\n\n${mentions.map(m=>`[${m.project}] ${fmt(m.date)}:\n${m.summary}`).join("\n\n")}`,500):"";
+      const intelligence=mentions.length>0?await claude(`Build a stakeholder intelligence profile for ${member.name}. Cover: what they care about most, how they communicate, what they push back on, reliability on commitments, how to work with them effectively.\n\n${mentions.map(m=>`[${m.project}] ${fmt(m.date)}:\n${m.summary}`).join("\n\n")}`,500):"";
       await db.updateMemberSummary(memberId,summary);
       if(intelligence) await db.updateMemberIntelligence(memberId,intelligence);
       await reload();
     }catch{}finally{setMemberLoading(false);}
   };
 
+  // FIX #7: createProject now passes context
   const createProject=async()=>{
     if(!newProjName.trim()||!userId)return;
-    const p=await db.createProject(userId,newProjName.trim());
+    const p=await db.createProject(userId,newProjName.trim(),newProjContext.trim());
     setData(d=>({...d,projects:[...d.projects,p]}));
-    setActiveIdx(data.projects.length);setNewProjName("");setView("project");
+    setActiveIdx(data.projects.length); setNewProjName(""); setNewProjContext(""); setView("project");
+  };
+
+  // FIX #7: save edited context
+  const saveContext=async()=>{
+    if(!activeProject||!userId)return;
+    await db.updateProjectContext(activeProject.id,contextDraft);
+    setData(d=>({...d,projects:d.projects.map(p=>p.id===activeProject.id?{...p,context:contextDraft}:p)}));
+    setEditingContext(false);
+    setToast("Project context saved");
   };
 
   const buildPriorCtx=proj=>{
     if(!proj||proj.notes.length===0)return"";
     const parts=[];
+    if(proj.context)parts.push(`Project background: ${proj.context}`);
     if(proj.status)parts.push(`Status:\n${proj.status}`);
     proj.notes.slice(-3).forEach(n=>parts.push(`[${fmt(n.date)}]\n${n.summary}`));
     return parts.join("\n\n");
@@ -1181,14 +943,13 @@ Bullet list of tasks not tied to any project. If none write "None."
 
   const analyseNote=async notesVal=>{
     if(!notesVal.trim()){setError("Please enter notes.");return;}
-    setNotes(notesVal);setError("");setLoading(true);
-    const mentioned=extractMentions(notesVal),selfTagged=meInNotes(notesVal);
-    taggedMembersRef.current=mentioned;
-    taggedSelfRef.current=selfTagged;
-    setTaggedMembers(mentioned);setTaggedSelf(selfTagged);
+    setNotes(notesVal); setError(""); setLoading(true);
+    const mentioned=extractMentions(notesVal), selfTagged=meInNotes(notesVal);
+    taggedMembersRef.current=mentioned; taggedSelfRef.current=selfTagged;
+    setTaggedMembers(mentioned); setTaggedSelf(selfTagged);
     try{
       const prior=buildPriorCtx(activeProject);
-      const raw=await claude(`Review new meeting notes.${prior?` Existing context:\n${prior}\n\n`:" "}Identify up to 3 things STILL unclear. Return [] if clear. ONLY a valid JSON array of strings.\n\nNotes:\n${notesVal}`,400);
+      const raw=await claude(`${projCtxPrefix(activeProject)}Review new meeting notes.${prior?` Existing context:\n${prior}\n\n`:" "}Identify up to 3 things STILL unclear that aren't answered by the project background. Return [] if clear. ONLY a valid JSON array of strings.\n\nNotes:\n${notesVal}`,400);
       const qs=parseJsonSafe(raw);
       if(!qs||!Array.isArray(qs)||qs.length===0){await finaliseNote(notesVal,{},mentioned,selfTagged);}
       else{setQuestions(qs);setAnswers(Object.fromEntries(qs.map((_,i)=>[i,""])));setNotePhase("clarifying");}
@@ -1197,47 +958,40 @@ Bullet list of tasks not tied to any project. If none write "None."
   };
 
   const finaliseNote=async(notesVal,ans,mentionedOvr,selfOvr)=>{
-    setLoading(true);setError("");
+    setLoading(true); setError("");
     const n=notesVal||notes;
     const mentioned=mentionedOvr??taggedMembersRef.current;
     const selfMentioned=selfOvr??taggedSelfRef.current;
     try{
       const clarifs=questions.length>0?"\n\nClarifications:\n"+questions.map((q,i)=>ans[i]?`Q: ${q}\nA: ${ans[i]}`:null).filter(Boolean).join("\n"):"";
-      const summary=await claude(`Convert to structured summary:\n1. Overview\n2. Key decisions\n3. Action items\n4. Discussion\n5. Next steps\nUse markdown.\n\nNotes:\n${n}${clarifs}`,1200);
-
+      const summary=await claude(`${projCtxPrefix(activeProject)}Convert to structured summary:\n1. Overview\n2. Key decisions\n3. Action items\n4. Discussion\n5. Next steps\nUse markdown.\n\nNotes:\n${n}${clarifs}`,1200);
       const note=await db.createNote(userId,activeProject.id,{raw:n,summary,selfTagged:selfMentioned,taggedMemberIds:mentioned.map(m=>m.id)});
-      const intel=await extractIntelligence(summary,note.id,activeProject.id,activeProject.name,activeProject.notes);
-
+      const intel=await extractIntelligence(summary,note.id,activeProject.id,activeProject.name,activeProject.notes,activeProject);
       await Promise.all([
         intel.decisions?.length>0?db.saveDecisions(userId,activeProject.id,note.id,intel.decisions):Promise.resolve(),
         intel.commitments?.length>0?db.saveCommitments(userId,activeProject.id,note.id,intel.commitments,members):Promise.resolve(),
-        intel.risks?.length>0?db.saveRisks(userId,activeProject.id,intel.risks):Promise.resolve(),
         intel.quality?db.saveQualityScore(userId,note.id,intel.quality):Promise.resolve(),
       ]);
-
       const d=await reload();
       const proj=d.projects.find(p=>p.id===activeProject.id);
       if(proj){
         const allS=proj.notes.map((nn,i)=>`Meeting ${i+1} (${fmt(nn.date)}):\n${nn.summary}`).join("\n\n");
-        const status=await claude(`Latest status for "${proj.name}". Current state, open actions, decisions, blockers, next steps.\n${allS}`,700);
+        const status=await claude(`${projCtxPrefix(proj)}Latest status for "${proj.name}". Current state, open actions, decisions, blockers, next steps.\n${allS}`,700);
         await db.updateProjectStatus(proj.id,status);
-        // FEATURE 1: suggest RAG after every note save
-        await suggestRag(proj.id, {...proj, notes: proj.notes});
+        // FIX #6: re-evaluate risks fresh on every note save
+        await reevaluateRisks(proj.id, {...proj, notes:proj.notes}, userId);
+        await suggestRag(proj.id, proj);
       }
-
       if(selfMentioned)await extractTodosFromNote(summary,activeProject.id);
-
       for(const m of mentioned){
         const allM=[];
         for(const p of(d.projects||[])) for(const nn of p.notes) if(nn.raw.toLowerCase().includes(m.name.toLowerCase())||nn.taggedMembers?.includes(m.id)) allM.push({project:p.name,date:nn.date,summary:nn.summary});
         if(allM.length>0){try{const ms=await claude(`Summarise ${m.name}'s activity.\n\n${allM.map(a=>`[${a.project}] ${fmt(a.date)}:\n${a.summary}`).join("\n\n---\n\n")}`,700);await db.updateMemberSummary(m.id,ms);}catch{}}
       }
-
       await reload();
-      setNotes("");setQuestions([]);setAnswers({});setTaggedMembers([]);setTaggedSelf(false);
-      taggedMembersRef.current=[];taggedSelfRef.current=false;
-      setNotePhase("input");
-      setView("project");
+      setNotes(""); setQuestions([]); setAnswers({}); setTaggedMembers([]); setTaggedSelf(false);
+      taggedMembersRef.current=[]; taggedSelfRef.current=false;
+      setNotePhase("input"); setView("project");
     }catch(e){setError("Failed to save. Please try again.");console.error(e);}
     finally{setLoading(false);}
   };
@@ -1246,17 +1000,17 @@ Bullet list of tasks not tied to any project. If none write "None."
     await db.deleteNote(noteId);
     const d=await reload();
     const proj=d.projects.find(p=>p.id===activeProject?.id);
-    if(proj&&proj.notes.length>0){try{const status=await claude(`Latest status for "${proj.name}":\n${proj.notes.map((n,i)=>`Meeting ${i+1}:\n${n.summary}`).join("\n\n")}`,700);await db.updateProjectStatus(proj.id,status);await reload();}catch{}}
+    if(proj&&proj.notes.length>0){try{const status=await claude(`${projCtxPrefix(proj)}Latest status for "${proj.name}":\n${proj.notes.map((n,i)=>`Meeting ${i+1}:\n${n.summary}`).join("\n\n")}`,700);await db.updateProjectStatus(proj.id,status);await reload();}catch{}}
   };
 
   const saveEditedNote=async(noteId,newRaw)=>{
-    if(!newRaw.trim())return;setEditSaving(true);
+    if(!newRaw.trim())return; setEditSaving(true);
     try{
-      const summary=await claude(`Convert to structured summary:\n1. Overview\n2. Key decisions\n3. Action items\n4. Discussion\n5. Next steps\nUse markdown.\n\nNotes:\n${newRaw}`,1200);
+      const summary=await claude(`${projCtxPrefix(activeProject)}Convert to structured summary:\n1. Overview\n2. Key decisions\n3. Action items\n4. Discussion\n5. Next steps\nUse markdown.\n\nNotes:\n${newRaw}`,1200);
       await db.updateNote(noteId,{raw:newRaw,summary});
       const d=await reload();
       const proj=d.projects.find(p=>p.id===activeProject?.id);
-      if(proj){const allS=proj.notes.map((n,i)=>`Meeting ${i+1} (${fmt(n.date)}):\n${n.summary}`).join("\n\n");const status=await claude(`Latest status for "${proj.name}".\n${allS}`,700);await db.updateProjectStatus(proj.id,status);await reload();}
+      if(proj){const allS=proj.notes.map((n,i)=>`Meeting ${i+1} (${fmt(n.date)}):\n${n.summary}`).join("\n\n");const status=await claude(`${projCtxPrefix(proj)}Latest status for "${proj.name}".\n${allS}`,700);await db.updateProjectStatus(proj.id,status);await reload();}
       setEditingNote(null);
     }catch(e){console.error(e);}finally{setEditSaving(false);}
   };
@@ -1271,8 +1025,15 @@ Bullet list of tasks not tied to any project. If none write "None."
   const deleteProject=async idx=>{
     const name=projects[idx]?.name||"this project";
     if(!window.confirm(`Delete "${name}"? This will permanently remove all notes, decisions, commitments and risks. This cannot be undone.`))return;
-    await db.deleteProject(projects[idx].id);
-    await reload();setView("home");setActiveIdx(null);
+    await db.deleteProject(projects[idx].id); await reload(); setView("home"); setActiveIdx(null);
+  };
+
+  const generateShareLink=async memberId=>{
+    if(!userId)return;
+    const token=await db.createShareToken(userId,memberId);
+    const url=`${window.location.origin}${window.location.pathname}?share=${token}`;
+    try{ await navigator.clipboard.writeText(url); setToast("Share link copied to clipboard"); }
+    catch{ setToast("Share link: "+url); }
   };
 
   const pendingTodos=todos.filter(t=>!t.done);
@@ -1282,12 +1043,14 @@ Bullet list of tasks not tied to any project. If none write "None."
   const upcomingTodos=pendingTodos.filter(t=>!isThisWeek(t.dueDate)&&!isOverdue(t.dueDate)&&t.dueDate);
   const undatedTodos=pendingTodos.filter(t=>!t.dueDate&&!isThisWeek(t.createdAt));
 
+  // ─── Nav (FIX #1: added Projects tab) ────────────────────────────────────────
   const Nav=()=>(
     <div style={{marginBottom:24,paddingBottom:14,borderBottom:`1px solid ${T.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
       <div style={{display:"flex",alignItems:"center",gap:16}}>
         <Logo/>
         <div id="tour-nav" style={{display:"flex",gap:0,flexWrap:"wrap"}}>
-          {[["home","Overview"],["todos","My Tasks"],["team","Team"]].map(([v,label])=>(
+          {/* FIX #1: Projects tab added */}
+          {[["home","Overview"],["projects","Projects"],["todos","My Tasks"],["team","Team"]].map(([v,label])=>(
             <button key={v} onClick={()=>setView(v)} style={{padding:"5px 12px",fontSize:"13px",fontWeight:view===v?700:400,color:view===v?T.accent:T.mid,background:"transparent",border:"none",borderBottom:view===v?`2px solid ${T.accent}`:"2px solid transparent",cursor:"pointer",fontFamily:T.sans}}>{label}</button>
           ))}
         </div>
@@ -1300,21 +1063,15 @@ Bullet list of tasks not tied to any project. If none write "None."
             <span style={{position:"absolute",top:-4,right:-4,background:T.danger,color:"#fff",borderRadius:"50%",width:14,height:14,fontSize:"9px",fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center"}}>{undismissedRisks.length}</span>
           </div>
         )}
-        <div id="tour-project" style={{display:"inline-block"}}>
-          <Btn size="sm" onClick={()=>{setNewProjName("");setView("newProject");}}>+ Project</Btn>
+        <div id="tour-project">
+          <Btn size="sm" onClick={()=>{setNewProjName("");setNewProjContext("");setView("newProject");}}>+ Project</Btn>
         </div>
         <Btn size="sm" variant="secondary" onClick={signOut}>Sign out</Btn>
       </div>
     </div>
   );
 
-  const SectionTitle=({children,sub})=>(
-    <div style={{marginBottom:14}}>
-      <h2 style={{margin:0,fontSize:"18px",fontWeight:700,fontFamily:T.serif,color:T.ink,letterSpacing:"-0.01em"}}>{children}</h2>
-      {sub&&<p style={{margin:"2px 0 0",fontSize:"12px",color:T.muted}}>{sub}</p>}
-    </div>
-  );
-
+  const SectionTitle=({children,sub})=>(<div style={{marginBottom:14}}><h2 style={{margin:0,fontSize:"18px",fontWeight:700,fontFamily:T.serif,color:T.ink,letterSpacing:"-0.01em"}}>{children}</h2>{sub&&<p style={{margin:"2px 0 0",fontSize:"12px",color:T.muted}}>{sub}</p>}</div>);
   const SearchEl=()=>showSearch?<SearchAskOverlay projects={projects} members={members} todos={todos} onClose={()=>setShowSearch(false)} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>:null;
 
   if(!data) return <Shell><div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"60vh"}}><p style={{color:T.muted}}>Loading your workspace…</p></div></Shell>;
@@ -1325,31 +1082,28 @@ Bullet list of tasks not tied to any project. If none write "None."
         <div style={{marginBottom:24,display:"flex",justifyContent:"center"}}><Logo/></div>
         <h1 style={{fontFamily:T.serif,fontSize:"26px",fontWeight:700,margin:"0 0 8px",color:T.ink}}>Welcome to Debrief</h1>
         <p style={{color:T.mid,fontSize:"13px",margin:"0 0 32px",lineHeight:1.6}}>What should we call you?</p>
-        <Card>
-          <Label>Your Name</Label>
-          <input value={meName} onChange={e=>setMeName(e.target.value)} placeholder="e.g. John" onKeyDown={e=>e.key==="Enter"&&saveMe()} style={inp}/>
-          <div style={{marginTop:12}}><Btn onClick={saveMe} disabled={!meName.trim()}>Get started →</Btn></div>
-        </Card>
+        <Card><Label>Your Name</Label><input value={meName} onChange={e=>setMeName(e.target.value)} placeholder="e.g. John" onKeyDown={e=>e.key==="Enter"&&saveMe()} style={inp}/><div style={{marginTop:12}}><Btn onClick={saveMe} disabled={!meName.trim()}>Get started →</Btn></div></Card>
       </div>
     </Shell>
   );
 
-  // ── HOME ────────────────────────────────────────────────────────────────────
+  // Global pickers rendered at root so they overlay any view
+  const GlobalPickers = () => (<>
+    {reassignTodo&&<ProjectTagPicker projects={projects} currentProjectId={reassignTodo.currentProjectId} onSelect={newProjId=>handleReassignProject(reassignTodo.id,newProjId)} onClose={()=>setReassignTodo(null)}/>}
+    {ragPickerProjectId&&<RagPicker current={projects.find(p=>p.id===ragPickerProjectId)?.rag} onSelect={async rag=>{await db.updateProjectRag(ragPickerProjectId,rag,true);await reload();}} onClose={()=>setRagPickerProjectId(null)}/>}
+  </>);
+
+  // ── HOME ──────────────────────────────────────────────────────────────────
   if(view==="home") return (
     <Shell>
       {toast&&<Toast message={toast} onDone={()=>setToast(null)}/>}
-      {ragPickerProjectId&&(
-        <RagPicker
-          current={projects.find(p=>p.id===ragPickerProjectId)?.rag}
-          onSelect={async(rag)=>{await db.updateProjectRag(ragPickerProjectId,rag,true);await reload();}}
-          onClose={()=>setRagPickerProjectId(null)}
-        />
-      )}
+      <GlobalPickers/>
       <SearchEl/>
       {showTour&&<Tour onDone={handleTourDone}/>}
       <BottomSearchBar onClick={()=>setShowSearch(true)}/>
       <Nav/>
 
+      {/* FIX #5/#6: Risk Radar — show all with scroll + refresh button */}
       {undismissedRisks.length>0&&(
         <Card style={{marginBottom:14,borderLeft:`3px solid ${T.danger}`}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
@@ -1358,8 +1112,14 @@ Bullet list of tasks not tied to any project. If none write "None."
               <h2 style={{margin:0,fontFamily:T.serif,fontSize:"15px",fontWeight:700,color:T.danger}}>Risk Radar</h2>
               <span style={{background:T.danger+"14",color:T.danger,borderRadius:2,padding:"1px 7px",fontSize:"11px",fontWeight:700}}>{undismissedRisks.length} active</span>
             </div>
+            <Btn variant="ghost" size="sm" onClick={async()=>{
+              setRiskLoading(true);
+              try{ const d=await db.loadAll(userId); for(const p of d.projects) if(p.notes.length>0) await reevaluateRisks(p.id,p,userId); await reload(); }
+              finally{ setRiskLoading(false); }
+            }} disabled={riskLoading}>{riskLoading?"Re-evaluating…":"↻ Re-evaluate all"}</Btn>
           </div>
-          {undismissedRisks.slice(0,4).map(r=>{
+          {/* FIX #5: show all or just 4 */}
+          {(showAllRisks ? undismissedRisks : undismissedRisks.slice(0,4)).map(r=>{
             const proj=projects.find(p=>p.id===r.project_id);
             return(
               <div key={r.id} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"7px 0",borderBottom:`1px solid ${T.border}`}}>
@@ -1372,6 +1132,11 @@ Bullet list of tasks not tied to any project. If none write "None."
               </div>
             );
           })}
+          {undismissedRisks.length>4&&(
+            <button onClick={()=>setShowAllRisks(s=>!s)} style={{marginTop:8,fontSize:"12px",color:T.accentMid,background:"none",border:"none",cursor:"pointer",fontFamily:T.sans,padding:0}}>
+              {showAllRisks?`Show less ↑`:`Show all ${undismissedRisks.length} risks ↓`}
+            </button>
+          )}
         </Card>
       )}
 
@@ -1391,41 +1156,93 @@ Bullet list of tasks not tied to any project. If none write "None."
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
         <Card>
           <h3 id="tour-tasks" style={{margin:"0 0 10px",fontSize:"13px",fontWeight:600,color:T.ink}}>This Week <span style={{fontSize:"11px",fontWeight:400,color:T.muted}}>({thisWeekTodos.length+overdueTodos.length})</span></h3>
-          {[...overdueTodos.slice(0,2),...thisWeekTodos.slice(0,3)].map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>)}
+          {[...overdueTodos.slice(0,2),...thisWeekTodos.slice(0,3)].map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,curProjId)=>setReassignTodo({id,currentProjectId:curProjId})}/>)}
           {thisWeekTodos.length===0&&overdueTodos.length===0&&<p style={{fontSize:"12px",color:T.muted,margin:0}}>No tasks due this week.</p>}
         </Card>
-        {/* FEATURE 1: Projects grid now shows RAG dot + click to override */}
+        {/* FIX #5: Projects card — show all with scroll */}
         <Card>
           <h3 style={{margin:"0 0 10px",fontSize:"13px",fontWeight:600,color:T.ink}}>Projects <span style={{fontSize:"11px",fontWeight:400,color:T.muted}}>({projects.length})</span></h3>
           {projects.length===0?<p style={{fontSize:"12px",color:T.muted,margin:0}}>No projects yet.</p>
-            :projects.slice(0,6).map((p,i)=>{
-              const pRisks=(p.risks||[]).filter(r=>!r.dismissed).length;
-              return(
-                <div key={p.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"6px 0",borderBottom:`1px solid ${T.border}`}}>
-                  <div onClick={()=>{setActiveIdx(i);setView("project");}} style={{display:"flex",alignItems:"center",gap:7,minWidth:0,flex:1,cursor:"pointer"}}>
-                    <div style={{width:3,height:14,background:pc(i),flexShrink:0}}/>
-                    <span style={{fontSize:"13px",fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:T.ink}}>{p.name}</span>
-                  </div>
-                  <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
-                    {pRisks>0&&<span style={{fontSize:"10px",color:T.danger}}>⚠ {pRisks}</span>}
-                    <span style={{fontSize:"11px",color:T.muted}}>{p.notes.length}</span>
-                    {/* RAG dot — click to override */}
-                    <div onClick={()=>setRagPickerProjectId(p.id)} title={p.rag ? `Health: ${RAG_LABELS[p.rag]} — click to change` : "No health score yet — click to set"} style={{cursor:"pointer",display:"flex",alignItems:"center",gap:3}}>
-                      {p.rag ? <RagDot rag={p.rag} size={10}/> : <span style={{width:10,height:10,borderRadius:"50%",border:`1.5px dashed ${T.muted}`,display:"inline-block"}} title="No health score"/>}
+            :<>
+              <div style={{maxHeight:showAllProjects?"none":240,overflowY:showAllProjects?"visible":"auto"}}>
+                {projects.map((p,i)=>{
+                  const pRisks=(p.risks||[]).filter(r=>!r.dismissed).length;
+                  return(
+                    <div key={p.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"6px 0",borderBottom:`1px solid ${T.border}`}}>
+                      <div onClick={()=>{setActiveIdx(i);setView("project");}} style={{display:"flex",alignItems:"center",gap:7,minWidth:0,flex:1,cursor:"pointer"}}>
+                        <div style={{width:3,height:14,background:pc(i),flexShrink:0}}/>
+                        <span style={{fontSize:"13px",fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:T.ink}}>{p.name}</span>
+                      </div>
+                      <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+                        {pRisks>0&&<span style={{fontSize:"10px",color:T.danger}}>⚠ {pRisks}</span>}
+                        <span style={{fontSize:"11px",color:T.muted}}>{p.notes.length}</span>
+                        <div onClick={()=>setRagPickerProjectId(p.id)} title={p.rag?`Health: ${RAG_LABELS[p.rag]} — click to change`:"No health score — click to set"} style={{cursor:"pointer",display:"flex",alignItems:"center"}}>
+                          {p.rag?<RagDot rag={p.rag} size={10}/>:<span style={{width:10,height:10,borderRadius:"50%",border:`1.5px dashed ${T.muted}`,display:"inline-block"}}/>}
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                </div>
-              );
-            })}
+                  );
+                })}
+              </div>
+              {projects.length>6&&(
+                <button onClick={()=>setShowAllProjects(s=>!s)} style={{marginTop:8,fontSize:"12px",color:T.accentMid,background:"none",border:"none",cursor:"pointer",fontFamily:T.sans,padding:0}}>
+                  {showAllProjects?"Show less ↑":`Show all ${projects.length} projects ↓`}
+                </button>
+              )}
+            </>}
         </Card>
       </div>
     </Shell>
   );
 
-  // ── TODOS ───────────────────────────────────────────────────────────────────
+  // ── PROJECTS VIEW (FIX #1) ────────────────────────────────────────────────
+  if(view==="projects") return (
+    <Shell>
+      {toast&&<Toast message={toast} onDone={()=>setToast(null)}/>}
+      <GlobalPickers/>
+      <SearchEl/>
+      <BottomSearchBar onClick={()=>setShowSearch(true)}/>
+      <Nav/>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:8}}>
+        <SectionTitle sub={`${projects.length} project${projects.length!==1?"s":""}`}>Projects</SectionTitle>
+        <Btn size="sm" onClick={()=>{setNewProjName("");setNewProjContext("");setView("newProject");}}>+ New Project</Btn>
+      </div>
+      {projects.length===0
+        ?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No projects yet. Create one to get started.</p></Card>
+        :<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:10}}>
+          {projects.map((p,i)=>{
+            const openTasks=todos.filter(t=>!t.done&&t.projectId===p.id).length;
+            const pRisks=(p.risks||[]).filter(r=>!r.dismissed).length;
+            const openComm=(p.commitments||[]).filter(c=>c.status==="open").length;
+            const lastNote=[...(p.notes||[])].sort((a,b)=>new Date(b.date)-new Date(a.date))[0];
+            return(
+              <div key={p.id} onClick={()=>{setActiveIdx(i);setView("project");}} style={{background:T.white,border:`1px solid ${T.border}`,borderTop:`3px solid ${pc(i)}`,padding:"14px 16px",cursor:"pointer",fontFamily:T.sans,boxSizing:"border-box"}}>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+                  <h3 style={{margin:0,fontSize:"14px",fontWeight:700,color:T.ink,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{p.name}</h3>
+                  <div onClick={e=>{e.stopPropagation();setRagPickerProjectId(p.id);}} style={{marginLeft:8,cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
+                    {p.rag?<><RagDot rag={p.rag} size={10}/><span style={{fontSize:"11px",color:RAG_COLORS[p.rag],fontWeight:600}}>{RAG_LABELS[p.rag]}</span></>:<span style={{fontSize:"11px",color:T.muted}}>No RAG</span>}
+                  </div>
+                </div>
+                {p.context&&<p style={{margin:"0 0 8px",fontSize:"11px",color:T.mid,lineHeight:1.4,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{p.context}</p>}
+                <div style={{display:"flex",gap:10,fontSize:"11px",color:T.muted,flexWrap:"wrap"}}>
+                  <span>{p.notes.length} notes</span>
+                  {openTasks>0&&<span style={{color:T.accent}}>{openTasks} open tasks</span>}
+                  {pRisks>0&&<span style={{color:T.danger}}>⚠ {pRisks} risks</span>}
+                  {openComm>0&&<span style={{color:T.warning}}>⚡ {openComm} commitments</span>}
+                </div>
+                {lastNote&&<p style={{margin:"8px 0 0",fontSize:"11px",color:T.muted}}>Last meeting: {fmt(lastNote.date)}</p>}
+              </div>
+            );
+          })}
+        </div>}
+    </Shell>
+  );
+
+  // ── TODOS ─────────────────────────────────────────────────────────────────
   if(view==="todos") return (
     <Shell>
       {toast&&<Toast message={toast} onDone={()=>setToast(null)}/>}
+      <GlobalPickers/>
       <SearchEl/>
       <BottomSearchBar onClick={()=>setShowSearch(true)}/>
       <Nav/>
@@ -1439,30 +1256,38 @@ Bullet list of tasks not tied to any project. If none write "None."
           ))}
         </div>
       </div>
+      {/* FIX #4: newTodoProjectId uses "__none__" sentinel so "No project" saves correctly */}
       <Card>
         <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-end"}}>
           <div style={{flex:"1 1 140px"}}><Label>Task</Label><input value={newTodoText} onChange={e=>setNewTodoText(e.target.value)} placeholder="Add a task…" onKeyDown={e=>e.key==="Enter"&&addTodo()} style={inp}/></div>
-          <div style={{flex:"1 1 110px"}}><Label>Project</Label><select value={newTodoProjectId} onChange={e=>setNewTodoProjectId(e.target.value)} style={{...inp}}><option value="">No project</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></div>
+          <div style={{flex:"1 1 110px"}}>
+            <Label>Project</Label>
+            <select value={newTodoProjectId} onChange={e=>setNewTodoProjectId(e.target.value)} style={{...inp}}>
+              <option value="__none__">No project</option>
+              {projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </div>
           <div style={{flex:"1 1 110px"}}><Label>Assign to</Label><select value={newTodoMemberId} onChange={e=>setNewTodoMemberId(e.target.value)} style={{...inp}}><option value="">Myself</option>{members.map(m=><option key={m.id} value={m.id}>{m.name}</option>)}</select></div>
           <div style={{flex:"0 0 auto"}}><Label>Due</Label><input type="date" value={newTodoDue} onChange={e=>setNewTodoDue(e.target.value)} style={{...inp,width:"auto"}}/></div>
           <Btn onClick={addTodo} disabled={!newTodoText.trim()}>Add</Btn>
         </div>
       </Card>
       {todoFilter==="pending"&&(<>
-        {overdueTodos.length>0&&<><GroupLabel color={T.danger}>Overdue</GroupLabel><Card>{overdueTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>)}</Card></>}
-        {thisWeekTodos.length>0&&<><GroupLabel>This Week</GroupLabel><Card>{thisWeekTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>)}</Card></>}
-        {upcomingTodos.length>0&&<><GroupLabel>Upcoming</GroupLabel><Card>{upcomingTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>)}</Card></>}
-        {undatedTodos.length>0&&<><GroupLabel>No Date</GroupLabel><Card>{undatedTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>)}</Card></>}
+        {overdueTodos.length>0&&<><GroupLabel color={T.danger}>Overdue</GroupLabel><Card>{overdueTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card></>}
+        {thisWeekTodos.length>0&&<><GroupLabel>This Week</GroupLabel><Card>{thisWeekTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card></>}
+        {upcomingTodos.length>0&&<><GroupLabel>Upcoming</GroupLabel><Card>{upcomingTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card></>}
+        {undatedTodos.length>0&&<><GroupLabel>No Date</GroupLabel><Card>{undatedTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card></>}
         {pendingTodos.length===0&&<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>All caught up.</p></Card>}
       </>)}
-      {todoFilter==="done"&&(doneTodos.length===0?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No completed tasks yet.</p></Card>:<Card>{[...doneTodos].reverse().map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo}/>)}</Card>)}
+      {todoFilter==="done"&&(doneTodos.length===0?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No completed tasks yet.</p></Card>:<Card>{[...doneTodos].reverse().map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card>)}
     </Shell>
   );
 
-  // ── TEAM ────────────────────────────────────────────────────────────────────
+  // ── TEAM ──────────────────────────────────────────────────────────────────
   if(view==="team") return (
     <Shell>
       {toast&&<Toast message={toast} onDone={()=>setToast(null)}/>}
+      <GlobalPickers/>
       <SearchEl/>
       <BottomSearchBar onClick={()=>setShowSearch(true)}/>
       <Nav/>
@@ -1484,22 +1309,11 @@ Bullet list of tasks not tied to any project. If none write "None."
               <Card key={m.id} accent={avatarBg(m.name)} style={{cursor:"pointer",marginBottom:0}}>
                 <div onClick={()=>{setActiveMemberId(m.id);setView("memberView");}} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
                   <Av name={m.name} size={30}/>
-                  <div style={{minWidth:0}}>
-                    <div style={{fontWeight:600,fontSize:"13px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:T.ink}}>{m.name}</div>
-                    {m.role&&<div style={{fontSize:"11px",color:T.muted}}>{m.role}</div>}
-                  </div>
+                  <div style={{minWidth:0}}><div style={{fontWeight:600,fontSize:"13px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:T.ink}}>{m.name}</div>{m.role&&<div style={{fontSize:"11px",color:T.muted}}>{m.role}</div>}</div>
                 </div>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:"11px",color:T.muted}}>
-                  <div style={{display:"flex",gap:8}}>
-                    <span>{nc} notes</span>
-                    {openComm>0&&<span style={{color:T.warning}}>⚡ {openComm} open</span>}
-                  </div>
-                  {/* FEATURE 4: Share link button on team card */}
-                  <button onClick={e=>{e.stopPropagation();generateShareLink(m.id);}}
-                    title="Copy share link for this person's tasks"
-                    style={{background:"none",border:"none",cursor:"pointer",fontSize:"12px",color:T.accentMid,padding:0,fontFamily:T.sans}}>
-                    🔗 Share
-                  </button>
+                  <div style={{display:"flex",gap:8}}><span>{nc} notes</span>{openComm>0&&<span style={{color:T.warning}}>⚡ {openComm} open</span>}</div>
+                  <button onClick={e=>{e.stopPropagation();generateShareLink(m.id);}} title="Copy share link" style={{background:"none",border:"none",cursor:"pointer",fontSize:"12px",color:T.accentMid,padding:0,fontFamily:T.sans}}>🔗 Share</button>
                 </div>
               </Card>
             );
@@ -1508,91 +1322,53 @@ Bullet list of tasks not tied to any project. If none write "None."
     </Shell>
   );
 
-  // ── MEMBER VIEW ─────────────────────────────────────────────────────────────
+  // ── MEMBER VIEW ───────────────────────────────────────────────────────────
   if(view==="memberView"&&activeMember) return (
     <Shell>
       {toast&&<Toast message={toast} onDone={()=>setToast(null)}/>}
+      <GlobalPickers/>
       <SearchEl/>
       <BottomSearchBar onClick={()=>setShowSearch(true)}/>
       <Nav/>
       <button onClick={()=>setView("team")} style={{fontSize:"12px",color:T.mid,background:"none",border:"none",cursor:"pointer",padding:"0 0 16px",fontFamily:T.sans}}>← Team</button>
       <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:20,flexWrap:"wrap"}}>
         <Av name={activeMember.name} size={44}/>
-        <div style={{flex:1,minWidth:0}}>
-          <h1 style={{margin:0,fontFamily:T.serif,fontSize:"20px",fontWeight:700,color:T.ink}}>{activeMember.name}</h1>
-          {activeMember.role&&<p style={{margin:"2px 0 0",fontSize:"13px",color:T.mid}}>{activeMember.role}</p>}
-        </div>
+        <div style={{flex:1,minWidth:0}}><h1 style={{margin:0,fontFamily:T.serif,fontSize:"20px",fontWeight:700,color:T.ink}}>{activeMember.name}</h1>{activeMember.role&&<p style={{margin:"2px 0 0",fontSize:"13px",color:T.mid}}>{activeMember.role}</p>}</div>
         <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
           <Btn variant="secondary" size="sm" onClick={()=>generateMemberSummary(activeMember.id)} disabled={memberLoading}>{memberLoading?"Updating…":activeMember.summary?"↻ Refresh":"Generate"}</Btn>
-          {/* FEATURE 4: Share button in member view */}
           <Btn variant="secondary" size="sm" onClick={()=>generateShareLink(activeMember.id)}>🔗 Share tasks</Btn>
           <Btn variant="danger" size="sm" onClick={()=>{deleteMember(activeMember.id);setView("team");}}>Remove</Btn>
         </div>
       </div>
-
-      {activeMember.intelligence&&(
-        <Card style={{marginBottom:10,background:T.accentLight,border:`1px solid ${T.accentMid}30`}}>
-          <h3 style={{margin:"0 0 8px",fontSize:"13px",fontWeight:700,color:T.accent,letterSpacing:"0.04em",textTransform:"uppercase"}}>Stakeholder Intelligence</h3>
-          <p style={{margin:0,fontSize:"13px",color:T.ink,lineHeight:1.6,textAlign:"left"}}>{activeMember.intelligence}</p>
-        </Card>
-      )}
-
+      {activeMember.intelligence&&(<Card style={{marginBottom:10,background:T.accentLight,border:`1px solid ${T.accentMid}30`}}><h3 style={{margin:"0 0 8px",fontSize:"13px",fontWeight:700,color:T.accent,letterSpacing:"0.04em",textTransform:"uppercase"}}>Stakeholder Intelligence</h3><p style={{margin:0,fontSize:"13px",color:T.ink,lineHeight:1.6,textAlign:"left"}}>{activeMember.intelligence}</p></Card>)}
       <Card accent={avatarBg(activeMember.name)}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,flexWrap:"wrap",gap:6}}>
           <h2 style={{margin:0,fontFamily:T.serif,fontSize:"15px",fontWeight:700,color:T.ink}}>Activity Summary</h2>
           {activeMember.summary_updated_at&&<span style={{fontSize:"11px",color:T.muted}}>{fmt(activeMember.summary_updated_at)}</span>}
         </div>
-        {memberLoading?<p style={{color:T.muted,fontSize:"13px"}}>Generating…</p>
-          :activeMember.summary?<MD content={activeMember.summary} small/>
-          :<p style={{color:T.muted,fontSize:"13px",margin:0}}>Tag @{activeMember.name} in notes or click Generate.</p>}
+        {memberLoading?<p style={{color:T.muted,fontSize:"13px"}}>Generating…</p>:activeMember.summary?<MD content={activeMember.summary} small/>:<p style={{color:T.muted,fontSize:"13px",margin:0}}>Tag @{activeMember.name} in notes or click Generate.</p>}
       </Card>
-
-      {(()=>{
-        const memberCommitments=projects.flatMap(p=>(p.commitments||[]).filter(c=>c.member_id===activeMember.id).map(c=>({...c,projectName:p.name})));
-        if(!memberCommitments.length)return null;
-        return(
-          <Card>
-            <h3 style={{margin:"0 0 10px",fontSize:"13px",fontWeight:600,color:T.ink}}>Commitments ({memberCommitments.length})</h3>
-            {memberCommitments.map(c=>(
-              <div key={c.id} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"7px 0",borderBottom:`1px solid ${T.border}`}}>
-                <span style={{fontSize:"12px",flexShrink:0,marginTop:1,color:c.status==="open"?T.warning:T.success}}>{c.status==="open"?"●":"✓"}</span>
-                <div style={{flex:1,minWidth:0}}>
-                  <p style={{margin:0,fontSize:"13px",color:T.ink,lineHeight:1.4}}>{c.commitment_text}</p>
-                  <span style={{fontSize:"11px",color:T.muted}}>{c.projectName} · {fmt(c.date)}</span>
-                </div>
-                {c.status==="open"&&<button onClick={()=>db.updateCommitmentStatus(c.id,"done").then(reload)} style={{background:"none",border:"none",fontSize:"11px",color:T.success,cursor:"pointer",padding:0,flexShrink:0}}>Mark done</button>}
-              </div>
-            ))}
-          </Card>
-        );
-      })()}
-
-      {(()=>{
-        const mentions=[];
-        for(const p of projects) for(const n of p.notes) if(n.taggedMembers?.includes(activeMember.id)||n.raw.toLowerCase().includes(activeMember.name.toLowerCase())) mentions.push({...n,projectName:p.name,projIdx:projects.findIndex(pp=>pp.name===p.name)});
-        if(!mentions.length) return <Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No notes mention this person yet.</p></Card>;
-        return(<><GroupLabel>Meeting Notes ({mentions.length})</GroupLabel>{[...mentions].reverse().map(n=>(
-          <Card key={n.id}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5,flexWrap:"wrap",gap:6}}>
-              <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}><Tag color={pc(n.projIdx)}>{n.projectName}</Tag><span style={{fontSize:"11px",color:T.muted}}>{fmt(n.date)}</span></div>
-              <Btn variant="ghost" size="sm" onClick={()=>setExpandedNote(expandedNote===n.id?null:n.id)}>{expandedNote===n.id?"Hide":"View"}</Btn>
-            </div>
-            {expandedNote===n.id?<MD content={n.summary} small/>:<p style={{fontSize:"12px",color:T.muted,margin:0,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{n.summary.replace(/[#*]/g,"").slice(0,100)}…</p>}
-          </Card>
-        ))}</>);
-      })()}
+      {(()=>{ const mc=projects.flatMap(p=>(p.commitments||[]).filter(c=>c.member_id===activeMember.id).map(c=>({...c,projectName:p.name}))); if(!mc.length)return null; return(<Card><h3 style={{margin:"0 0 10px",fontSize:"13px",fontWeight:600,color:T.ink}}>Commitments ({mc.length})</h3>{mc.map(c=>(<div key={c.id} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"7px 0",borderBottom:`1px solid ${T.border}`}}><span style={{fontSize:"12px",flexShrink:0,marginTop:1,color:c.status==="open"?T.warning:T.success}}>{c.status==="open"?"●":"✓"}</span><div style={{flex:1,minWidth:0}}><p style={{margin:0,fontSize:"13px",color:T.ink,lineHeight:1.4}}>{c.commitment_text}</p><span style={{fontSize:"11px",color:T.muted}}>{c.projectName} · {fmt(c.date)}</span></div>{c.status==="open"&&<button onClick={()=>db.updateCommitmentStatus(c.id,"done").then(reload)} style={{background:"none",border:"none",fontSize:"11px",color:T.success,cursor:"pointer",padding:0,flexShrink:0}}>Mark done</button>}</div>))}</Card>); })()}
+      {(()=>{ const mentions=[]; for(const p of projects) for(const n of p.notes) if(n.taggedMembers?.includes(activeMember.id)||n.raw.toLowerCase().includes(activeMember.name.toLowerCase())) mentions.push({...n,projectName:p.name,projIdx:projects.findIndex(pp=>pp.name===p.name)}); if(!mentions.length) return <Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No notes mention this person yet.</p></Card>; return(<><GroupLabel>Meeting Notes ({mentions.length})</GroupLabel>{[...mentions].reverse().map(n=>(<Card key={n.id}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5,flexWrap:"wrap",gap:6}}><div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}><Tag color={pc(n.projIdx)}>{n.projectName}</Tag><span style={{fontSize:"11px",color:T.muted}}>{fmt(n.date)}</span></div><Btn variant="ghost" size="sm" onClick={()=>setExpandedNote(expandedNote===n.id?null:n.id)}>{expandedNote===n.id?"Hide":"View"}</Btn></div>{expandedNote===n.id?<MD content={n.summary} small/>:<p style={{fontSize:"12px",color:T.muted,margin:0,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{n.summary.replace(/[#*]/g,"").slice(0,100)}…</p>}</Card>))}</>); })()}
     </Shell>
   );
 
-  // ── NEW PROJECT ─────────────────────────────────────────────────────────────
+  // ── NEW PROJECT (FIX #7: context field) ──────────────────────────────────
   if(view==="newProject") return (
-    <Shell maxW={440}>
+    <Shell maxW={480}>
       <Nav/>
       <SectionTitle>New Project</SectionTitle>
       <Card>
-        <Label>Project Name</Label>
-        <input style={inp} value={newProjName} onChange={e=>setNewProjName(e.target.value)} placeholder="e.g. Product Launch Q2" onKeyDown={e=>e.key==="Enter"&&createProject()}/>
-        <div style={{display:"flex",gap:8,marginTop:12}}>
+        <div style={{marginBottom:14}}>
+          <Label>Project Name</Label>
+          <input style={inp} value={newProjName} onChange={e=>setNewProjName(e.target.value)} placeholder="e.g. Product Launch Q2" onKeyDown={e=>e.key==="Enter"&&newProjContext===''&&createProject()}/>
+        </div>
+        <div>
+          <Label>Project Context <span style={{fontSize:"10px",fontWeight:400,color:T.muted,textTransform:"none",letterSpacing:0}}>(optional — helps Claude ask fewer clarification questions)</span></Label>
+          <textarea value={newProjContext} onChange={e=>setNewProjContext(e.target.value)} placeholder={`e.g. "This is a 6-month ERP rollout for a 200-person FMCG company. Key stakeholders: CFO and Head of Supply Chain. Main risks are data migration and change management. We use SAP and o9."`} style={{...inp,height:100,resize:"vertical",lineHeight:1.6,fontSize:"13px"}}/>
+          <p style={{margin:"4px 0 0",fontSize:"11px",color:T.muted}}>This context will be included in every AI analysis for this project.</p>
+        </div>
+        <div style={{display:"flex",gap:8,marginTop:16}}>
           <Btn onClick={createProject} disabled={!newProjName.trim()}>Create Project</Btn>
           <Btn variant="secondary" onClick={()=>setView("home")}>Cancel</Btn>
         </div>
@@ -1600,19 +1376,11 @@ Bullet list of tasks not tied to any project. If none write "None."
     </Shell>
   );
 
-  // ── PROJECT VIEW ────────────────────────────────────────────────────────────
+  // ── PROJECT VIEW ──────────────────────────────────────────────────────────
   if(view==="project"&&activeProject) return (
     <Shell>
       {toast&&<Toast message={toast} onDone={()=>setToast(null)}/>}
-      {/* FEATURE 1: RAG picker on project page */}
-      {ragPickerProjectId&&(
-        <RagPicker
-          current={projects.find(p=>p.id===ragPickerProjectId)?.rag}
-          onSelect={async(rag)=>{await db.updateProjectRag(ragPickerProjectId,rag,true);await reload();}}
-          onClose={()=>setRagPickerProjectId(null)}
-        />
-      )}
-      {/* FEATURE 2: Pre-meeting briefing modal */}
+      <GlobalPickers/>
       {showBriefing&&<PreMeetingBriefing project={activeProject} todos={todos} members={members} onClose={()=>setShowBriefing(false)}/>}
       <SearchEl/>
       {editingNote&&<EditNoteModal note={editingNote} projectName={activeProject.name} onSave={raw=>saveEditedNote(editingNote.id,raw)} onCancel={()=>setEditingNote(null)} saving={editSaving}/>}
@@ -1623,7 +1391,6 @@ Bullet list of tasks not tied to any project. If none write "None."
           <button onClick={()=>setView("home")} style={{fontSize:"12px",color:T.mid,background:"none",border:"none",cursor:"pointer",padding:0,fontFamily:T.sans,flexShrink:0}}>← Overview</button>
           <div style={{width:3,height:16,background:pc(activeIdx),flexShrink:0}}/>
           <h1 style={{margin:0,fontFamily:T.serif,fontSize:"19px",fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:T.ink}}>{activeProject.name}</h1>
-          {/* FEATURE 1: RAG dot on project header */}
           {activeProject.rag&&(
             <div onClick={()=>setRagPickerProjectId(activeProject.id)} style={{cursor:"pointer",display:"flex",alignItems:"center",gap:4}} title={`Health: ${RAG_LABELS[activeProject.rag]} — click to change`}>
               <RagDot rag={activeProject.rag} size={11}/>
@@ -1632,17 +1399,36 @@ Bullet list of tasks not tied to any project. If none write "None."
           )}
         </div>
         <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-          {/* FEATURE 2: Brief me button */}
           <Btn size="sm" variant="secondary" onClick={()=>setShowBriefing(true)}>⚡ Brief me</Btn>
           <Btn size="sm" onClick={()=>{setNotePhase("input");setNotes("");setError("");setTaggedMembers([]);setTaggedSelf(false);setView("addNote");}}>+ Add Notes</Btn>
           <Btn variant="danger" size="sm" onClick={()=>deleteProject(activeIdx)}>Delete</Btn>
         </div>
       </div>
 
+      {/* FIX #7: Project context card — editable */}
+      {(activeProject.context||editingContext)&&(
+        <Card style={{marginBottom:10,background:"#FAFAF8",borderLeft:`3px solid ${T.accentMid}`}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:editingContext?8:0}}>
+            <h3 style={{margin:0,fontSize:"11px",fontWeight:700,letterSpacing:"0.07em",textTransform:"uppercase",color:T.accentMid}}>Project Context</h3>
+            {!editingContext&&<button onClick={()=>{setContextDraft(activeProject.context||"");setEditingContext(true);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:"11px",color:T.mid,fontFamily:T.sans}}>Edit</button>}
+          </div>
+          {editingContext
+            ?<><textarea value={contextDraft} onChange={e=>setContextDraft(e.target.value)} style={{...inp,height:80,resize:"vertical",lineHeight:1.6,fontSize:"13px",marginBottom:8}}/><div style={{display:"flex",gap:8}}><Btn size="sm" onClick={saveContext}>Save</Btn><Btn size="sm" variant="secondary" onClick={()=>setEditingContext(false)}>Cancel</Btn></div></>
+            :<p style={{margin:"4px 0 0",fontSize:"12px",color:T.mid,lineHeight:1.5}}>{activeProject.context}</p>
+          }
+        </Card>
+      )}
+      {!activeProject.context&&!editingContext&&(
+        <button onClick={()=>{setContextDraft("");setEditingContext(true);}} style={{fontSize:"12px",color:T.muted,background:"none",border:"none",cursor:"pointer",fontFamily:T.sans,padding:"0 0 10px",display:"block"}}>+ Add project context (helps Claude ask fewer questions)</button>
+      )}
+
+      {/* FIX #2: Inline add task at top of project */}
+      <InlineAddTask projectId={activeProject.id} userId={userId} members={members} onAdd={t=>{setData(d=>({...d,todos:[...d.todos,t]}));}}/>
+
       {todos.filter(t=>t.projectId===activeProject.id&&!t.done).length>0&&(
         <Card>
-          <h3 style={{margin:"0 0 8px",fontSize:"13px",fontWeight:600,color:T.ink}}>My Open Tasks</h3>
-          {todos.filter(t=>t.projectId===activeProject.id&&!t.done).map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo}/>)}
+          <h3 style={{margin:"0 0 8px",fontSize:"13px",fontWeight:600,color:T.ink}}>Open Tasks</h3>
+          {todos.filter(t=>t.projectId===activeProject.id&&!t.done).map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}
         </Card>
       )}
 
@@ -1663,9 +1449,7 @@ Bullet list of tasks not tied to any project. If none write "None."
           ["commitments",`Commitments (${(activeProject.commitments||[]).filter(c=>c.status==="open").length} open)`],
           ["risks",`Risks (${(activeProject.risks||[]).filter(r=>!r.dismissed).length})`],
         ].map(([tab,label])=>(
-          <button key={tab} onClick={()=>setActiveProjectTab(tab)} style={{padding:"7px 14px",fontSize:"12px",fontWeight:activeProjectTab===tab?700:400,color:activeProjectTab===tab?T.accent:T.mid,background:"transparent",border:"none",borderBottom:activeProjectTab===tab?`2px solid ${T.accent}`:"2px solid transparent",cursor:"pointer",fontFamily:T.sans,whiteSpace:"nowrap"}}>
-            {label}
-          </button>
+          <button key={tab} onClick={()=>setActiveProjectTab(tab)} style={{padding:"7px 14px",fontSize:"12px",fontWeight:activeProjectTab===tab?700:400,color:activeProjectTab===tab?T.accent:T.mid,background:"transparent",border:"none",borderBottom:activeProjectTab===tab?`2px solid ${T.accent}`:"2px solid transparent",cursor:"pointer",fontFamily:T.sans,whiteSpace:"nowrap"}}>{label}</button>
         ))}
       </div>
 
@@ -1682,12 +1466,7 @@ Bullet list of tasks not tied to any project. If none write "None."
                     {n.qualityScore&&<ScoreBadge score={n.qualityScore.score}/>}
                     {n.qualityScore&&<span style={{fontSize:"11px",color:T.muted}}>{n.qualityScore.feedback}</span>}
                   </div>
-                  {(tagged.length>0||n.selfTagged)&&(
-                    <div style={{display:"flex",gap:4,marginTop:4,flexWrap:"wrap"}}>
-                      {n.selfTagged&&<Tag color={T.accent}>You</Tag>}
-                      {tagged.map(m=><Tag key={m.id} color={avatarBg(m.name)} onClick={()=>{setActiveMemberId(m.id);setView("memberView");}}>{m.name}</Tag>)}
-                    </div>
-                  )}
+                  {(tagged.length>0||n.selfTagged)&&(<div style={{display:"flex",gap:4,marginTop:4,flexWrap:"wrap"}}>{n.selfTagged&&<Tag color={T.accent}>You</Tag>}{tagged.map(m=><Tag key={m.id} color={avatarBg(m.name)} onClick={()=>{setActiveMemberId(m.id);setView("memberView");}}>{m.name}</Tag>)}</div>)}
                 </div>
                 <div style={{display:"flex",gap:5,flexShrink:0,flexWrap:"wrap",justifyContent:"flex-end"}}>
                   <Btn variant="secondary" size="sm" onClick={()=>setExpandedNote(expandedNote===n.id?null:n.id)}>{expandedNote===n.id?"Hide":"View"}</Btn>
@@ -1696,71 +1475,76 @@ Bullet list of tasks not tied to any project. If none write "None."
                   <Btn variant="danger" size="sm" onClick={()=>deleteNote(n.id)}>Del</Btn>
                 </div>
               </div>
-              {expandedNote===n.id?<div style={{borderTop:`1px solid ${T.border}`,paddingTop:10}}><MD content={n.summary} small/></div>
-                :<p style={{fontSize:"12px",color:T.muted,margin:0,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{n.summary.replace(/[#*]/g,"").slice(0,110)}…</p>}
+              {expandedNote===n.id?<div style={{borderTop:`1px solid ${T.border}`,paddingTop:10}}><MD content={n.summary} small/></div>:<p style={{fontSize:"12px",color:T.muted,margin:0,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{n.summary.replace(/[#*]/g,"").slice(0,110)}…</p>}
             </Card>
           );
         })
       )}
 
       {activeProjectTab==="decisions"&&(
-        (activeProject.decisions||[]).length===0
-          ?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No decisions extracted yet.</p></Card>
-          :[...activeProject.decisions].reverse().map(d=>(
-            <Card key={d.id} accent={T.accent}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:4,gap:6}}>
-                <p style={{margin:0,fontSize:"13px",fontWeight:600,color:T.ink,flex:1}}>{d.decision_text}</p>
-                <span style={{fontSize:"11px",color:T.muted,flexShrink:0}}>{fmt(d.date)}</span>
-              </div>
-              {d.context&&<p style={{margin:0,fontSize:"12px",color:T.mid,lineHeight:1.5}}>{d.context}</p>}
-            </Card>
-          ))
+        (activeProject.decisions||[]).length===0?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No decisions extracted yet.</p></Card>
+        :[...activeProject.decisions].reverse().map(d=>(
+          <Card key={d.id} accent={T.accent}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:4,gap:6}}>
+              <p style={{margin:0,fontSize:"13px",fontWeight:600,color:T.ink,flex:1}}>{d.decision_text}</p>
+              <span style={{fontSize:"11px",color:T.muted,flexShrink:0}}>{fmt(d.date)}</span>
+            </div>
+            {d.context&&<p style={{margin:0,fontSize:"12px",color:T.mid,lineHeight:1.5}}>{d.context}</p>}
+          </Card>
+        ))
       )}
 
       {activeProjectTab==="commitments"&&(
-        (activeProject.commitments||[]).length===0
-          ?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No commitments extracted yet.</p></Card>
-          :[...activeProject.commitments].reverse().map(c=>{
-            const member=members.find(m=>m.id===c.member_id);
-            return(
-              <Card key={c.id}>
-                <div style={{display:"flex",alignItems:"flex-start",gap:10}}>
-                  <span style={{fontSize:"14px",flexShrink:0,marginTop:1,color:c.status==="open"?T.warning:T.success}}>{c.status==="open"?"●":"✓"}</span>
-                  <div style={{flex:1,minWidth:0}}>
-                    <p style={{margin:"0 0 4px",fontSize:"13px",color:T.ink,lineHeight:1.4}}>{c.commitment_text}</p>
-                    <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
-                      {member&&<Tag color={avatarBg(member.name)}>{member.name}</Tag>}
-                      <span style={{fontSize:"11px",color:T.muted}}>{fmt(c.date)}</span>
-                      <span style={{fontSize:"11px",color:c.status==="open"?T.warning:T.success,fontWeight:600}}>{c.status}</span>
-                    </div>
-                  </div>
-                  {c.status==="open"&&<button onClick={()=>db.updateCommitmentStatus(c.id,"done").then(reload)} style={{background:"none",border:"none",fontSize:"11px",color:T.success,cursor:"pointer",padding:0,flexShrink:0,whiteSpace:"nowrap"}}>Mark done</button>}
+        (activeProject.commitments||[]).length===0?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No commitments extracted yet.</p></Card>
+        :[...activeProject.commitments].reverse().map(c=>{ const member=members.find(m=>m.id===c.member_id); return(
+          <Card key={c.id}>
+            <div style={{display:"flex",alignItems:"flex-start",gap:10}}>
+              <span style={{fontSize:"14px",flexShrink:0,marginTop:1,color:c.status==="open"?T.warning:T.success}}>{c.status==="open"?"●":"✓"}</span>
+              <div style={{flex:1,minWidth:0}}>
+                <p style={{margin:"0 0 4px",fontSize:"13px",color:T.ink,lineHeight:1.4}}>{c.commitment_text}</p>
+                <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                  {member&&<Tag color={avatarBg(member.name)}>{member.name}</Tag>}
+                  <span style={{fontSize:"11px",color:T.muted}}>{fmt(c.date)}</span>
+                  <span style={{fontSize:"11px",color:c.status==="open"?T.warning:T.success,fontWeight:600}}>{c.status}</span>
                 </div>
-              </Card>
-            );
-          })
+              </div>
+              {c.status==="open"&&<button onClick={()=>db.updateCommitmentStatus(c.id,"done").then(reload)} style={{background:"none",border:"none",fontSize:"11px",color:T.success,cursor:"pointer",padding:0,flexShrink:0,whiteSpace:"nowrap"}}>Mark done</button>}
+            </div>
+          </Card>
+        );})
       )}
 
       {activeProjectTab==="risks"&&(
         (activeProject.risks||[]).filter(r=>!r.dismissed).length===0
-          ?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No active risks.</p></Card>
-          :(activeProject.risks||[]).filter(r=>!r.dismissed).map(r=>(
-            <Card key={r.id} style={{borderLeft:`3px solid ${r.severity==="high"?T.danger:r.severity==="medium"?T.warning:T.accentMid}`}}>
-              <div style={{display:"flex",alignItems:"flex-start",gap:10}}>
-                <SeverityBadge severity={r.severity}/>
-                <div style={{flex:1,minWidth:0}}>
-                  <p style={{margin:"0 0 4px",fontSize:"13px",color:T.ink,lineHeight:1.4}}>{r.risk_text}</p>
-                  <span style={{fontSize:"11px",color:T.muted}}>{fmt(r.detected_at)}</span>
-                </div>
-                <button onClick={()=>db.dismissRisk(r.id).then(reload)} style={{background:"none",border:"none",fontSize:"11px",color:T.muted,cursor:"pointer",padding:0,flexShrink:0}}>Dismiss</button>
+          ?<Card>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <p style={{color:T.muted,fontSize:"13px",margin:0}}>No active risks.</p>
+                {/* FIX #6: manual re-evaluate button on risks tab */}
+                {activeProject.notes.length>0&&<Btn size="sm" variant="secondary" onClick={async()=>{setRiskLoading(true);try{const d=await db.loadAll(userId);const p=d.projects.find(pp=>pp.id===activeProject.id);if(p)await reevaluateRisks(p.id,p,userId);await reload();}finally{setRiskLoading(false);}}} disabled={riskLoading}>{riskLoading?"Re-evaluating…":"↻ Re-evaluate"}</Btn>}
               </div>
             </Card>
-          ))
+          :<>
+            <div style={{display:"flex",justifyContent:"flex-end",marginBottom:6}}>
+              <Btn size="sm" variant="secondary" onClick={async()=>{setRiskLoading(true);try{const d=await db.loadAll(userId);const p=d.projects.find(pp=>pp.id===activeProject.id);if(p)await reevaluateRisks(p.id,p,userId);await reload();}finally{setRiskLoading(false);}}} disabled={riskLoading}>{riskLoading?"Re-evaluating…":"↻ Re-evaluate risks"}</Btn>
+            </div>
+            {(activeProject.risks||[]).filter(r=>!r.dismissed).map(r=>(
+              <Card key={r.id} style={{borderLeft:`3px solid ${r.severity==="high"?T.danger:r.severity==="medium"?T.warning:T.accentMid}`}}>
+                <div style={{display:"flex",alignItems:"flex-start",gap:10}}>
+                  <SeverityBadge severity={r.severity}/>
+                  <div style={{flex:1,minWidth:0}}>
+                    <p style={{margin:"0 0 4px",fontSize:"13px",color:T.ink,lineHeight:1.4}}>{r.risk_text}</p>
+                    <span style={{fontSize:"11px",color:T.muted}}>{fmt(r.detected_at)}</span>
+                  </div>
+                  <button onClick={()=>db.dismissRisk(r.id).then(reload)} style={{background:"none",border:"none",fontSize:"11px",color:T.muted,cursor:"pointer",padding:0,flexShrink:0}}>Dismiss</button>
+                </div>
+              </Card>
+            ))}
+          </>
       )}
     </Shell>
   );
 
-  // ── ADD NOTE ────────────────────────────────────────────────────────────────
+  // ── ADD NOTE ──────────────────────────────────────────────────────────────
   if(view==="addNote") return (
     <Shell maxW={640}>
       <Nav/>
