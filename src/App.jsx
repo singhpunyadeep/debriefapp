@@ -80,6 +80,7 @@ const db = {
       projects: (projects||[]).map(p=>({
         ...p, statusUpdated:p.status_updated_at,
         rag: p.rag||null, ragOverride: p.rag_override||false,
+        deadline: p.deadline||null,
         // FIX #7: include project context
         context: p.context||"",
         notes:(notes||[]).filter(n=>n.project_id===p.id).map(n=>({
@@ -101,9 +102,9 @@ const db = {
     };
   },
 
-  async createProject(userId, name, context="") {
-    const {data}=await supabase.from('projects').insert({user_id:userId,name,context}).select().single();
-    return {...data,notes:[],decisions:[],commitments:[],risks:[],status:null,statusUpdated:null,rag:null,ragOverride:false,context:context||""};
+  async createProject(userId, name, context="", deadline=null) {
+    const {data}=await supabase.from('projects').insert({user_id:userId,name,context,deadline:deadline||null}).select().single();
+    return {...data,notes:[],decisions:[],commitments:[],risks:[],status:null,statusUpdated:null,rag:null,ragOverride:false,context:context||"",deadline:deadline||null};
   },
   async updateProjectStatus(projectId,status) {
     await supabase.from('projects').update({status,status_updated_at:new Date().toISOString()}).eq('id',projectId);
@@ -111,6 +112,9 @@ const db = {
   // FIX #7: update context
   async updateProjectContext(projectId, context) {
     await supabase.from('projects').update({context}).eq('id',projectId);
+  },
+  async updateProjectDeadline(projectId, deadline) {
+    await supabase.from('projects').update({deadline:deadline||null}).eq('id',projectId);
   },
   async updateProjectRag(projectId, rag, isOverride=false) {
     await supabase.from('projects').update({rag, rag_override: isOverride}).eq('id', projectId);
@@ -270,8 +274,8 @@ const GroupLabel = ({children,color=T.mid}) => (
   <p style={{margin:"14px 0 6px",fontSize:"10px",fontWeight:700,letterSpacing:"0.09em",textTransform:"uppercase",color}}>{children}</p>
 );
 
-const Logo = () => (
-  <div style={{display:"flex",alignItems:"center",gap:7}}>
+const Logo = ({onClick}) => (
+  <div onClick={onClick} style={{display:"flex",alignItems:"center",gap:7,cursor:onClick?"pointer":"default"}}>
     <div style={{width:3,height:20,background:T.accent}}/>
     <span style={{fontFamily:T.serif,fontSize:"16px",fontWeight:700,color:T.ink,letterSpacing:"-0.02em"}}>Debrief</span>
   </div>
@@ -659,7 +663,10 @@ const TodoItem=({todo,projects,members,onToggle,onDelete,onProjectNav,onReassign
         <div style={{display:"flex",gap:5,marginTop:3,flexWrap:"wrap",alignItems:"center"}}>
           {/* FIX #3: clicking project tag opens reassign picker */}
           {proj
-            ? <Tag color={pc(projIdx)} onClick={e=>{e.stopPropagation();onReassignProject&&onReassignProject(todo.id,todo.projectId);}}>{proj.name} ✎</Tag>
+            ? <span style={{display:"inline-flex",alignItems:"center",gap:3,flexShrink:0}}>
+                <Tag color={pc(projIdx)} onClick={()=>onProjectNav&&onProjectNav(projIdx)}>{proj.name}</Tag>
+                <span onClick={e=>{e.stopPropagation();onReassignProject&&onReassignProject(todo.id,todo.projectId);}} style={{cursor:"pointer",color:T.muted,fontSize:"11px",paddingLeft:2}} title="Reassign project">✎</span>
+              </span>
             : <span onClick={e=>{e.stopPropagation();onReassignProject&&onReassignProject(todo.id,null);}} style={{fontSize:"11px",color:T.muted,cursor:"pointer",borderBottom:`1px dashed ${T.border}`,paddingBottom:1}}>+ assign project</span>
           }
           {assignedMember&&<Tag color={avatarBg(assignedMember.name)}>{assignedMember.name}</Tag>}
@@ -717,9 +724,11 @@ export default function App() {
   const [newProjName,setNewProjName]=useState("");
   // FIX #7: new project context field
   const [newProjContext,setNewProjContext]=useState("");
+  const [newProjDeadline,setNewProjDeadline]=useState("");
   // FIX #7: edit context on project page
   const [editingContext,setEditingContext]=useState(false);
   const [contextDraft,setContextDraft]=useState("");
+  const [editingDeadline,setEditingDeadline]=useState(false);
   const [newMemberName,setNewMemberName]=useState("");
   const [newMemberRole,setNewMemberRole]=useState("");
   const [meName,setMeName]=useState("");
@@ -734,6 +743,8 @@ export default function App() {
   const [newTodoProjectId,setNewTodoProjectId]=useState("__none__");
   const [newTodoMemberId,setNewTodoMemberId]=useState("");
   const [todoFilter,setTodoFilter]=useState("pending");
+  const [todoProjectFilter,setTodoProjectFilter]=useState("__all__");
+  const [todoDueFilter,setTodoDueFilter]=useState("all"); // all | overdue | thisweek | upcoming | noduedate
   const [activeProjectTab,setActiveProjectTab]=useState("notes");
   const [toast,setToast]=useState(null);
   const [ragPickerProjectId,setRagPickerProjectId]=useState(null);
@@ -784,7 +795,8 @@ export default function App() {
       const highRisks=activeRisks.filter(r=>r.severity==="high");
       const lastNote=[...(proj.notes||[])].sort((a,b)=>new Date(b.date)-new Date(a.date))[0];
       const daysSince=lastNote?Math.floor((Date.now()-new Date(lastNote.date))/(1000*60*60*24)):999;
-      const raw=await claude(`Suggest a health status for this project: return ONLY one word: "red", "amber", or "green".\nRed = in trouble (high risks, many overdue, stale 30+ days). Amber = needs attention (some overdue, medium risks, stale 14+ days). Green = on track.\n\nProject: ${proj.name}\nDays since last note: ${daysSince}\nOpen tasks: ${openTasks.length} (${overdueTasks.length} overdue)\nHigh severity risks: ${highRisks.length}\nActive risks: ${activeRisks.length}\nStatus: ${proj.status?proj.status.slice(0,200):"none"}`,10);
+      const daysToDeadline=proj.deadline?Math.floor((new Date(proj.deadline)-Date.now())/(1000*60*60*24)):null;
+      const raw=await claude(`Suggest a health status: return ONLY one word: "red", "amber", or "green".\nRed = in trouble (high risks, many overdue, stale 30+ days, OR deadline <7 days away with open tasks). Amber = needs attention (some overdue, medium risks, stale 14+ days, OR deadline <21 days with open tasks). Green = on track.\n\nProject: ${proj.name}\nDays since last note: ${daysSince}\nOpen tasks: ${openTasks.length} (${overdueTasks.length} overdue)\nHigh severity risks: ${highRisks.length}\nActive risks: ${activeRisks.length}\n${daysToDeadline!==null?`Days to deadline: ${daysToDeadline}`:"No deadline set"}\nStatus: ${proj.status?proj.status.slice(0,200):"none"}`,10);
       const rag=raw.trim().toLowerCase().replace(/[^a-z]/g,"");
       if(["red","amber","green"].includes(rag)) await db.updateProjectRag(projectId,rag,false);
     } catch {}
@@ -796,6 +808,7 @@ export default function App() {
       const allNotes = (proj.notes||[]).map((n,i)=>`Meeting ${i+1} [${fmt(n.date)}]:\n${n.summary}`).join("\n\n");
       const openCommitments = (proj.commitments||[]).filter(c=>c.status==="open").map(c=>c.commitment_text).join(", ");
       const openTasks = todos.filter(t=>!t.done&&t.projectId===projectId).map(t=>t.text).join(", ");
+      const daysToDeadline=proj.deadline?Math.floor((new Date(proj.deadline)-Date.now())/(1000*60*60*24)):null;
       const raw = await claude(`${projCtxPrefix(proj)}Analyse this project and identify ONLY serious, high-impact risks. Do NOT flag minor or routine concerns. Only flag things that could genuinely derail the project, cause major delays, damage relationships, or result in significant failure.
 
 Return ONLY valid JSON array (max 5 items), no other text:
@@ -805,6 +818,7 @@ Only include severity "high" or "medium". Do NOT include "low" risks.
 If there are no serious risks, return [].
 
 Project: ${proj.name}
+${daysToDeadline!==null?`Deadline: ${fmt(proj.deadline)} (${daysToDeadline} days away)`:"No deadline set"}
 ${proj.status ? `Current status: ${proj.status.slice(0,400)}` : ""}
 Open tasks: ${openTasks||"none"}
 Open commitments: ${openCommitments||"none"}
@@ -918,9 +932,9 @@ ${summary}`,500);
   // FIX #7: createProject now passes context
   const createProject=async()=>{
     if(!newProjName.trim()||!userId)return;
-    const p=await db.createProject(userId,newProjName.trim(),newProjContext.trim());
+    const p=await db.createProject(userId,newProjName.trim(),newProjContext.trim(),newProjDeadline||null);
     setData(d=>({...d,projects:[...d.projects,p]}));
-    setActiveIdx(data.projects.length); setNewProjName(""); setNewProjContext(""); setView("project");
+    setActiveIdx(data.projects.length); setNewProjName(""); setNewProjContext(""); setNewProjDeadline(""); setView("project");
   };
 
   // FIX #7: save edited context
@@ -1047,10 +1061,10 @@ ${summary}`,500);
   const Nav=()=>(
     <div style={{marginBottom:24,paddingBottom:14,borderBottom:`1px solid ${T.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
       <div style={{display:"flex",alignItems:"center",gap:16}}>
-        <Logo/>
+        <Logo onClick={()=>setView("home")}/>
         <div id="tour-nav" style={{display:"flex",gap:0,flexWrap:"wrap"}}>
           {/* FIX #1: Projects tab added */}
-          {[["home","Overview"],["projects","Projects"],["todos","My Tasks"],["team","Team"]].map(([v,label])=>(
+          {[["home","Home"],["projects","Projects"],["todos","My Tasks"],["team","Team"]].map(([v,label])=>(
             <button key={v} onClick={()=>setView(v)} style={{padding:"5px 12px",fontSize:"13px",fontWeight:view===v?700:400,color:view===v?T.accent:T.mid,background:"transparent",border:"none",borderBottom:view===v?`2px solid ${T.accent}`:"2px solid transparent",cursor:"pointer",fontFamily:T.sans}}>{label}</button>
           ))}
         </div>
@@ -1064,7 +1078,7 @@ ${summary}`,500);
           </div>
         )}
         <div id="tour-project">
-          <Btn size="sm" onClick={()=>{setNewProjName("");setNewProjContext("");setView("newProject");}}>+ Project</Btn>
+          <Btn size="sm" onClick={()=>{setNewProjName("");setNewProjContext("");setNewProjDeadline("");setView("newProject");}}>+ Project</Btn>
         </div>
         <Btn size="sm" variant="secondary" onClick={signOut}>Sign out</Btn>
       </div>
@@ -1164,8 +1178,8 @@ ${summary}`,500);
           <h3 style={{margin:"0 0 10px",fontSize:"13px",fontWeight:600,color:T.ink}}>Projects <span style={{fontSize:"11px",fontWeight:400,color:T.muted}}>({projects.length})</span></h3>
           {projects.length===0?<p style={{fontSize:"12px",color:T.muted,margin:0}}>No projects yet.</p>
             :<>
-              <div style={{maxHeight:showAllProjects?"none":240,overflowY:showAllProjects?"visible":"auto"}}>
-                {projects.map((p,i)=>{
+              <div>
+                {(showAllProjects ? projects : projects.slice(0,6)).map((p,i)=>{
                   const pRisks=(p.risks||[]).filter(r=>!r.dismissed).length;
                   return(
                     <div key={p.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"6px 0",borderBottom:`1px solid ${T.border}`}}>
@@ -1174,6 +1188,7 @@ ${summary}`,500);
                         <span style={{fontSize:"13px",fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:T.ink}}>{p.name}</span>
                       </div>
                       <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+                        {p.deadline&&(()=>{const d=Math.floor((new Date(p.deadline)-Date.now())/(1000*60*60*24));return <span style={{fontSize:"10px",color:d<0?T.danger:d<=7?T.danger:d<=21?T.warning:T.muted,fontWeight:d<=7?700:400}}>📅{d<0?`${Math.abs(d)}d over`:`${d}d`}</span>})()}
                         {pRisks>0&&<span style={{fontSize:"10px",color:T.danger}}>⚠ {pRisks}</span>}
                         <span style={{fontSize:"11px",color:T.muted}}>{p.notes.length}</span>
                         <div onClick={()=>setRagPickerProjectId(p.id)} title={p.rag?`Health: ${RAG_LABELS[p.rag]} — click to change`:"No health score — click to set"} style={{cursor:"pointer",display:"flex",alignItems:"center"}}>
@@ -1205,7 +1220,7 @@ ${summary}`,500);
       <Nav/>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:8}}>
         <SectionTitle sub={`${projects.length} project${projects.length!==1?"s":""}`}>Projects</SectionTitle>
-        <Btn size="sm" onClick={()=>{setNewProjName("");setNewProjContext("");setView("newProject");}}>+ New Project</Btn>
+        <Btn size="sm" onClick={()=>{setNewProjName("");setNewProjContext("");setNewProjDeadline("");setView("newProject");}}>+ New Project</Btn>
       </div>
       {projects.length===0
         ?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No projects yet. Create one to get started.</p></Card>
@@ -1230,7 +1245,8 @@ ${summary}`,500);
                   {pRisks>0&&<span style={{color:T.danger}}>⚠ {pRisks} risks</span>}
                   {openComm>0&&<span style={{color:T.warning}}>⚡ {openComm} commitments</span>}
                 </div>
-                {lastNote&&<p style={{margin:"8px 0 0",fontSize:"11px",color:T.muted}}>Last meeting: {fmt(lastNote.date)}</p>}
+                {p.deadline&&(()=>{const d=Math.floor((new Date(p.deadline)-Date.now())/(1000*60*60*24));const c=d<0?T.danger:d<=7?T.danger:d<=21?T.warning:T.muted;return <p style={{margin:"6px 0 0",fontSize:"11px",color:c,fontWeight:d<=7?600:400}}>📅 {fmt(p.deadline)} {d<0?`(${Math.abs(d)}d overdue)`:`(${d}d remaining)`}</p>})()}
+                {lastNote&&<p style={{margin:"6px 0 0",fontSize:"11px",color:T.muted}}>Last meeting: {fmt(lastNote.date)}</p>}
               </div>
             );
           })}
@@ -1239,14 +1255,24 @@ ${summary}`,500);
   );
 
   // ── TODOS ─────────────────────────────────────────────────────────────────
-  if(view==="todos") return (
+  if(view==="todos") {
+    // Apply project + due date filters on top of pending/done
+    const baseList = todoFilter==="done" ? doneTodos : pendingTodos;
+    const projFiltered = todoProjectFilter==="__all__" ? baseList : baseList.filter(t=>(todoProjectFilter==="__none__" ? !t.projectId : t.projectId===todoProjectFilter));
+    const dueFiltered = todoDueFilter==="all" ? projFiltered
+      : todoDueFilter==="overdue" ? projFiltered.filter(t=>isOverdue(t.dueDate))
+      : todoDueFilter==="thisweek" ? projFiltered.filter(t=>isThisWeek(t.dueDate)||(!t.dueDate&&isThisWeek(t.createdAt)))
+      : todoDueFilter==="upcoming" ? projFiltered.filter(t=>t.dueDate&&!isThisWeek(t.dueDate)&&!isOverdue(t.dueDate))
+      : projFiltered.filter(t=>!t.dueDate); // noduedate
+    const isFiltered = todoProjectFilter!=="__all__" || todoDueFilter!=="all";
+    return (
     <Shell>
       {toast&&<Toast message={toast} onDone={()=>setToast(null)}/>}
       <GlobalPickers/>
       <SearchEl/>
       <BottomSearchBar onClick={()=>setShowSearch(true)}/>
       <Nav/>
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:8}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10,flexWrap:"wrap",gap:8}}>
         <SectionTitle>My Tasks</SectionTitle>
         <div style={{display:"flex",gap:6}}>
           {["pending","done"].map(f=>(
@@ -1256,7 +1282,25 @@ ${summary}`,500);
           ))}
         </div>
       </div>
-      {/* FIX #4: newTodoProjectId uses "__none__" sentinel so "No project" saves correctly */}
+
+      {/* Filter bar */}
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:12,alignItems:"center"}}>
+        <select value={todoProjectFilter} onChange={e=>setTodoProjectFilter(e.target.value)} style={{...inp,width:"auto",fontSize:"12px",padding:"5px 8px"}}>
+          <option value="__all__">All projects</option>
+          <option value="__none__">No project</option>
+          {projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+        <select value={todoDueFilter} onChange={e=>setTodoDueFilter(e.target.value)} style={{...inp,width:"auto",fontSize:"12px",padding:"5px 8px"}}>
+          <option value="all">All due dates</option>
+          <option value="overdue">Overdue</option>
+          <option value="thisweek">This week</option>
+          <option value="upcoming">Upcoming</option>
+          <option value="noduedate">No due date</option>
+        </select>
+        {isFiltered&&<button onClick={()=>{setTodoProjectFilter("__all__");setTodoDueFilter("all");}} style={{fontSize:"11px",color:T.danger,background:"none",border:"none",cursor:"pointer",fontFamily:T.sans,padding:0}}>✕ Clear filters</button>}
+        <span style={{fontSize:"11px",color:T.muted,marginLeft:"auto"}}>{dueFiltered.length} task{dueFiltered.length!==1?"s":""}</span>
+      </div>
+
       <Card>
         <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-end"}}>
           <div style={{flex:"1 1 140px"}}><Label>Task</Label><input value={newTodoText} onChange={e=>setNewTodoText(e.target.value)} placeholder="Add a task…" onKeyDown={e=>e.key==="Enter"&&addTodo()} style={inp}/></div>
@@ -1272,16 +1316,24 @@ ${summary}`,500);
           <Btn onClick={addTodo} disabled={!newTodoText.trim()}>Add</Btn>
         </div>
       </Card>
-      {todoFilter==="pending"&&(<>
+
+      {/* When filters active: flat list */}
+      {isFiltered ? (
+        dueFiltered.length===0
+          ? <Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No tasks match these filters.</p></Card>
+          : <Card>{dueFiltered.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card>
+      ) : todoFilter==="pending" ? (<>
         {overdueTodos.length>0&&<><GroupLabel color={T.danger}>Overdue</GroupLabel><Card>{overdueTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card></>}
         {thisWeekTodos.length>0&&<><GroupLabel>This Week</GroupLabel><Card>{thisWeekTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card></>}
         {upcomingTodos.length>0&&<><GroupLabel>Upcoming</GroupLabel><Card>{upcomingTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card></>}
         {undatedTodos.length>0&&<><GroupLabel>No Date</GroupLabel><Card>{undatedTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card></>}
         {pendingTodos.length===0&&<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>All caught up.</p></Card>}
-      </>)}
-      {todoFilter==="done"&&(doneTodos.length===0?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No completed tasks yet.</p></Card>:<Card>{[...doneTodos].reverse().map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card>)}
+      </>) : (
+        doneTodos.length===0?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No completed tasks yet.</p></Card>:<Card>{[...doneTodos].reverse().map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card>
+      )}
     </Shell>
-  );
+    );
+  }
 
   // ── TEAM ──────────────────────────────────────────────────────────────────
   if(view==="team") return (
@@ -1363,6 +1415,10 @@ ${summary}`,500);
           <Label>Project Name</Label>
           <input style={inp} value={newProjName} onChange={e=>setNewProjName(e.target.value)} placeholder="e.g. Product Launch Q2" onKeyDown={e=>e.key==="Enter"&&newProjContext===''&&createProject()}/>
         </div>
+        <div style={{marginBottom:14}}>
+          <Label>Deadline <span style={{fontSize:"10px",fontWeight:400,color:T.muted,textTransform:"none",letterSpacing:0}}>(optional — used to assess health score and risks)</span></Label>
+          <input type="date" value={newProjDeadline} onChange={e=>setNewProjDeadline(e.target.value)} style={{...inp,width:"auto"}}/>
+        </div>
         <div>
           <Label>Project Context <span style={{fontSize:"10px",fontWeight:400,color:T.muted,textTransform:"none",letterSpacing:0}}>(optional — helps Claude ask fewer clarification questions)</span></Label>
           <textarea value={newProjContext} onChange={e=>setNewProjContext(e.target.value)} placeholder={`e.g. "This is a 6-month ERP rollout for a 200-person FMCG company. Key stakeholders: CFO and Head of Supply Chain. Main risks are data migration and change management. We use SAP and o9."`} style={{...inp,height:100,resize:"vertical",lineHeight:1.6,fontSize:"13px"}}/>
@@ -1370,7 +1426,7 @@ ${summary}`,500);
         </div>
         <div style={{display:"flex",gap:8,marginTop:16}}>
           <Btn onClick={createProject} disabled={!newProjName.trim()}>Create Project</Btn>
-          <Btn variant="secondary" onClick={()=>setView("home")}>Cancel</Btn>
+          <Btn variant="secondary" onClick={()=>{setNewProjDeadline("");setView("home");}}>Cancel</Btn>
         </div>
       </Card>
     </Shell>
@@ -1388,7 +1444,7 @@ ${summary}`,500);
       <Nav/>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:18,flexWrap:"wrap",gap:8}}>
         <div style={{display:"flex",alignItems:"center",gap:10,minWidth:0}}>
-          <button onClick={()=>setView("home")} style={{fontSize:"12px",color:T.mid,background:"none",border:"none",cursor:"pointer",padding:0,fontFamily:T.sans,flexShrink:0}}>← Overview</button>
+          <button onClick={()=>setView("home")} style={{fontSize:"12px",color:T.mid,background:"none",border:"none",cursor:"pointer",padding:0,fontFamily:T.sans,flexShrink:0}}>← Home</button>
           <div style={{width:3,height:16,background:pc(activeIdx),flexShrink:0}}/>
           <h1 style={{margin:0,fontFamily:T.serif,fontSize:"19px",fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:T.ink}}>{activeProject.name}</h1>
           {activeProject.rag&&(
@@ -1421,6 +1477,30 @@ ${summary}`,500);
       {!activeProject.context&&!editingContext&&(
         <button onClick={()=>{setContextDraft("");setEditingContext(true);}} style={{fontSize:"12px",color:T.muted,background:"none",border:"none",cursor:"pointer",fontFamily:T.sans,padding:"0 0 10px",display:"block"}}>+ Add project context (helps Claude ask fewer questions)</button>
       )}
+
+      {/* Deadline display + inline edit */}
+      {(()=>{
+        const dl = activeProject.deadline;
+        const daysTo = dl ? Math.floor((new Date(dl)-Date.now())/(1000*60*60*24)) : null;
+        const dlColor = daysTo===null ? T.muted : daysTo<0 ? T.danger : daysTo<=7 ? T.danger : daysTo<=21 ? T.warning : T.success;
+        const dlLabel = daysTo===null ? "" : daysTo<0 ? `${Math.abs(daysTo)}d overdue` : daysTo===0 ? "today" : `${daysTo}d remaining`;
+        return editingDeadline ? (
+          <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:10,flexWrap:"wrap"}}>
+            <input type="date" defaultValue={dl||""} id="deadline-input" style={{...inp,width:"auto",fontSize:"13px"}}/>
+            <Btn size="sm" onClick={async()=>{const v=document.getElementById("deadline-input").value;await db.updateProjectDeadline(activeProject.id,v||null);setData(d=>({...d,projects:d.projects.map(p=>p.id===activeProject.id?{...p,deadline:v||null}:p)}));setEditingDeadline(false);setToast("Deadline saved");}}>Save</Btn>
+            <Btn size="sm" variant="secondary" onClick={()=>setEditingDeadline(false)}>Cancel</Btn>
+          </div>
+        ) : dl ? (
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+            <span style={{fontSize:"12px",color:T.mid}}>📅 Deadline:</span>
+            <span style={{fontSize:"12px",fontWeight:600,color:dlColor}}>{fmt(dl)}</span>
+            <span style={{fontSize:"11px",color:dlColor}}>({dlLabel})</span>
+            <button onClick={()=>setEditingDeadline(true)} style={{background:"none",border:"none",cursor:"pointer",fontSize:"11px",color:T.muted,fontFamily:T.sans}}>Edit</button>
+          </div>
+        ) : (
+          <button onClick={()=>setEditingDeadline(true)} style={{fontSize:"12px",color:T.muted,background:"none",border:"none",cursor:"pointer",fontFamily:T.sans,padding:"0 0 10px",display:"block"}}>+ Add project deadline (improves health score accuracy)</button>
+        );
+      })()}
 
       {/* FIX #2: Inline add task at top of project */}
       <InlineAddTask projectId={activeProject.id} userId={userId} members={members} onAdd={t=>{setData(d=>({...d,todos:[...d.todos,t]}));}}/>
