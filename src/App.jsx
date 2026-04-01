@@ -737,6 +737,52 @@ const InlineAddTask=({projectId,userId,members,onAdd})=>{
   );
 };
 
+// ─── ThisWeekList — proper component so useState is legal ────────────────────
+const ThisWeekList = ({todos,projects,members,onToggle,onDelete,onEdit,onProjectNav,onReassign}) => {
+  const [showAll,setShowAll] = useState(false);
+  const visible = showAll ? todos : todos.slice(0,5);
+  return (<>
+    {visible.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={onToggle} onDelete={onDelete} onEdit={onEdit} onProjectNav={onProjectNav} onReassignProject={onReassign}/>)}
+    {todos.length>5&&<button onClick={()=>setShowAll(s=>!s)} style={{marginTop:8,fontSize:"12px",color:T.accentMid,background:"none",border:"none",cursor:"pointer",fontFamily:T.sans,padding:0}}>{showAll?`Show less ↑`:`Show all ${todos.length} tasks ↓`}</button>}
+  </>);
+};
+
+// ─── MemberCard — proper component so useState is legal ──────────────────────
+const MemberCard = ({m,nc,openComm,onView,onShare,onEdit,onDelete}) => {
+  const [editing,setEditing] = useState(false);
+  const [eName,setEName] = useState(m.name);
+  const [eRole,setERole] = useState(m.role||"");
+  return (
+    <Card accent={avatarBg(m.name)} style={{marginBottom:0}}>
+      {editing?(
+        <div>
+          <input value={eName} onChange={e=>setEName(e.target.value)} style={{...inp,marginBottom:6,fontSize:"13px",padding:"5px 8px"}}/>
+          <input value={eRole} onChange={e=>setERole(e.target.value)} placeholder="Role" style={{...inp,marginBottom:8,fontSize:"13px",padding:"5px 8px"}}/>
+          <div style={{display:"flex",gap:6}}>
+            <Btn size="sm" onClick={()=>{onEdit(m.id,eName,eRole);setEditing(false);}}>Save</Btn>
+            <Btn size="sm" variant="secondary" onClick={()=>setEditing(false)}>Cancel</Btn>
+          </div>
+        </div>
+      ):(
+        <>
+          <div onClick={onView} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6,cursor:"pointer"}}>
+            <Av name={m.name} size={30}/>
+            <div style={{minWidth:0,flex:1}}><div style={{fontWeight:600,fontSize:"13px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:T.ink}}>{m.name}</div>{m.role&&<div style={{fontSize:"11px",color:T.muted}}>{m.role}</div>}</div>
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:"11px",color:T.muted}}>
+            <div style={{display:"flex",gap:8}}><span>{nc} notes</span>{openComm>0&&<span style={{color:T.warning}}>⚡ {openComm} open</span>}</div>
+            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              <button onClick={e=>{e.stopPropagation();onShare();}} title="Copy share link" style={{background:"none",border:"none",cursor:"pointer",fontSize:"12px",color:T.accentMid,padding:0,fontFamily:T.sans}}>🔗</button>
+              <button onClick={e=>{e.stopPropagation();setEName(m.name);setERole(m.role||"");setEditing(true);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:"12px",color:T.muted,padding:0}} title="Edit">✎</button>
+              <button onClick={e=>{e.stopPropagation();onDelete(m.id);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:"13px",color:T.muted,padding:0}} title="Remove">✕</button>
+            </div>
+          </div>
+        </>
+      )}
+    </Card>
+  );
+};
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
   const shareToken = useMemo(()=>{ const p=new URLSearchParams(window.location.search); return p.get("share")||null; },[]);
@@ -1237,13 +1283,8 @@ ${summary}`,500);
           <h3 id="tour-tasks" style={{margin:"0 0 10px",fontSize:"13px",fontWeight:600,color:T.ink}}>This Week <span style={{fontSize:"11px",fontWeight:400,color:T.muted}}>({thisWeekTodos.length+overdueTodos.length})</span></h3>
           {(()=>{
             const allWeek=[...overdueTodos,...thisWeekTodos];
-            const [showAll,setShowAll]=React.useState(false);
-            const visible=showAll?allWeek:allWeek.slice(0,5);
-            return(<>
-              {visible.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,curProjId)=>setReassignTodo({id,currentProjectId:curProjId})}/>)}
-              {allWeek.length===0&&<p style={{fontSize:"12px",color:T.muted,margin:0}}>No tasks due this week.</p>}
-              {allWeek.length>5&&<button onClick={()=>setShowAll(s=>!s)} style={{marginTop:8,fontSize:"12px",color:T.accentMid,background:"none",border:"none",cursor:"pointer",fontFamily:T.sans,padding:0}}>{showAll?`Show less ↑`:`Show all ${allWeek.length} tasks ↓`}</button>}
-            </>);
+            if(allWeek.length===0) return <p style={{fontSize:"12px",color:T.muted,margin:0}}>No tasks due this week.</p>;
+            return <ThisWeekList todos={allWeek} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassign={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>;
           })()}
         </Card>
         {/* FIX #5: Projects card — show all with scroll */}
@@ -1435,38 +1476,7 @@ ${summary}`,500);
           {members.map(m=>{
             const nc=projects.reduce((a,p)=>a+p.notes.filter(n=>n.taggedMembers?.includes(m.id)||n.raw.toLowerCase().includes(m.name.toLowerCase())).length,0);
             const openComm=projects.flatMap(p=>(p.commitments||[]).filter(c=>c.member_id===m.id&&c.status==="open")).length;
-            const [editingM,setEditingM]=React.useState(false);
-            const [eName,setEName]=React.useState(m.name);
-            const [eRole,setERole]=React.useState(m.role||"");
-            return(
-              <Card key={m.id} accent={avatarBg(m.name)} style={{marginBottom:0}}>
-                {editingM?(
-                  <div>
-                    <input value={eName} onChange={e=>setEName(e.target.value)} style={{...inp,marginBottom:6,fontSize:"13px",padding:"5px 8px"}}/>
-                    <input value={eRole} onChange={e=>setERole(e.target.value)} placeholder="Role" style={{...inp,marginBottom:8,fontSize:"13px",padding:"5px 8px"}}/>
-                    <div style={{display:"flex",gap:6}}>
-                      <Btn size="sm" onClick={()=>{editMember(m.id,eName,eRole);setEditingM(false);}}>Save</Btn>
-                      <Btn size="sm" variant="secondary" onClick={()=>setEditingM(false)}>Cancel</Btn>
-                    </div>
-                  </div>
-                ):(
-                  <>
-                    <div onClick={()=>{setActiveMemberId(m.id);setView("memberView");}} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6,cursor:"pointer"}}>
-                      <Av name={m.name} size={30}/>
-                      <div style={{minWidth:0,flex:1}}><div style={{fontWeight:600,fontSize:"13px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:T.ink}}>{m.name}</div>{m.role&&<div style={{fontSize:"11px",color:T.muted}}>{m.role}</div>}</div>
-                    </div>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:"11px",color:T.muted}}>
-                      <div style={{display:"flex",gap:8}}><span>{nc} notes</span>{openComm>0&&<span style={{color:T.warning}}>⚡ {openComm} open</span>}</div>
-                      <div style={{display:"flex",gap:8,alignItems:"center"}}>
-                        <button onClick={e=>{e.stopPropagation();generateShareLink(m.id);}} title="Copy share link" style={{background:"none",border:"none",cursor:"pointer",fontSize:"12px",color:T.accentMid,padding:0,fontFamily:T.sans}}>🔗</button>
-                        <button onClick={e=>{e.stopPropagation();setEName(m.name);setERole(m.role||"");setEditingM(true);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:"12px",color:T.muted,padding:0}} title="Edit">✎</button>
-                        <button onClick={e=>{e.stopPropagation();deleteMember(m.id);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:"13px",color:T.muted,padding:0}} title="Remove">✕</button>
-                      </div>
-                    </div>
-                  </>
-                )}
-              </Card>
-            );
+            return <MemberCard key={m.id} m={m} nc={nc} openComm={openComm} onView={()=>{setActiveMemberId(m.id);setView("memberView");}} onShare={()=>generateShareLink(m.id)} onEdit={editMember} onDelete={deleteMember}/>;
           })}
         </div>}
     </Shell>
