@@ -27,7 +27,7 @@ const isThisWeek = iso => {
 const isOverdue = iso => iso && new Date(iso)<new Date() && !isThisWeek(iso);
 
 const RAG_LABELS = { red:"Red", amber:"Amber", green:"Green" };
-const RAG_COLORS = { red:T.danger, amber:T.warning, green:T.success };
+const RAG_COLORS = { red:"#DC2626", amber:"#F59E0B", green:"#16A34A" };
 const RagDot = ({rag, size=10}) => rag
   ? <span style={{display:"inline-block",width:size,height:size,borderRadius:"50%",background:RAG_COLORS[rag],flexShrink:0}} title={RAG_LABELS[rag]}/>
   : null;
@@ -157,6 +157,12 @@ const db = {
       const member=members.find(m=>m.name.toLowerCase()===c.person?.toLowerCase());
       return {user_id:userId,project_id:projectId,note_id:noteId,commitment_text:c.commitment,member_id:member?.id||null,status:'open',date:new Date().toISOString()};
     }));
+    // Also create a task for each commitment so it shows in My Tasks
+    const todoInserts=commitments.map(c=>{
+      const member=members.find(m=>m.name.toLowerCase()===c.person?.toLowerCase());
+      return {user_id:userId,text:c.commitment,due_date:null,project_id:projectId,source:'ai',member_id:member?.id||null};
+    });
+    if(todoInserts.length>0) await supabase.from('todos').insert(todoInserts);
   },
   async updateCommitmentStatus(commitmentId,status) {
     await supabase.from('commitments').update({status}).eq('id',commitmentId);
@@ -185,6 +191,7 @@ const db = {
     await supabase.from('members').update({intelligence,intelligence_updated_at:new Date().toISOString()}).eq('id',memberId);
   },
   async deleteMember(memberId) { await supabase.from('members').delete().eq('id',memberId); },
+  async updateMember(memberId,{name,role}) { await supabase.from('members').update({name,role}).eq('id',memberId); },
 
   async createTodo(userId,{text,dueDate,projectId,source='manual',memberId}) {
     const {data}=await supabase.from('todos').insert({user_id:userId,text,due_date:dueDate||null,project_id:projectId||null,source,member_id:memberId||null}).select().single();
@@ -270,6 +277,11 @@ const inp = {width:"100%",padding:"9px 11px",border:`1px solid ${T.border}`,bord
 const Shell = ({children,maxW=820}) => (
   <div style={{fontFamily:T.sans,minHeight:"100vh",backgroundColor:T.bg,color:T.ink,boxSizing:"border-box",overflowX:"hidden"}}>
     <div style={{maxWidth:maxW,margin:"0 auto",padding:"28px 16px 80px",boxSizing:"border-box"}}>{children}</div>
+    <div style={{textAlign:"center",padding:"16px",fontSize:"11px",color:T.muted,borderTop:`1px solid ${T.border}`}}>
+      <a href="/privacy.html" style={{color:T.muted,marginRight:16}}>Privacy Policy</a>
+      <a href="/terms.html" style={{color:T.muted,marginRight:16}}>Terms of Service</a>
+      <a href="/refund.html" style={{color:T.muted}}>Refund Policy</a>
+    </div>
   </div>
 );
 
@@ -941,7 +953,8 @@ ${summary}`,500);
   };
 
   const addMember=async()=>{ if(!newMemberName.trim()||!userId)return; const m=await db.createMember(userId,{name:newMemberName.trim(),role:newMemberRole.trim()}); setData(d=>({...d,members:[...d.members,m]})); setNewMemberName(""); setNewMemberRole(""); };
-  const deleteMember=async id=>{ await db.deleteMember(id); setData(d=>({...d,members:d.members.filter(m=>m.id!==id)})); };
+  const deleteMember=async id=>{ if(!window.confirm("Remove this team member?"))return; await db.deleteMember(id); setData(d=>({...d,members:d.members.filter(m=>m.id!==id)})); };
+  const editMember=async(id,name,role)=>{ await db.updateMember(id,{name,role}); setData(d=>({...d,members:d.members.map(m=>m.id===id?{...m,name,role}:m)})); };
 
   const generateMemberSummary=async memberId=>{
     setMemberLoading(true);
@@ -1222,8 +1235,16 @@ ${summary}`,500);
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
         <Card>
           <h3 id="tour-tasks" style={{margin:"0 0 10px",fontSize:"13px",fontWeight:600,color:T.ink}}>This Week <span style={{fontSize:"11px",fontWeight:400,color:T.muted}}>({thisWeekTodos.length+overdueTodos.length})</span></h3>
-          {[...overdueTodos.slice(0,2),...thisWeekTodos.slice(0,3)].map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,curProjId)=>setReassignTodo({id,currentProjectId:curProjId})}/>)}
-          {thisWeekTodos.length===0&&overdueTodos.length===0&&<p style={{fontSize:"12px",color:T.muted,margin:0}}>No tasks due this week.</p>}
+          {(()=>{
+            const allWeek=[...overdueTodos,...thisWeekTodos];
+            const [showAll,setShowAll]=React.useState(false);
+            const visible=showAll?allWeek:allWeek.slice(0,5);
+            return(<>
+              {visible.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,curProjId)=>setReassignTodo({id,currentProjectId:curProjId})}/>)}
+              {allWeek.length===0&&<p style={{fontSize:"12px",color:T.muted,margin:0}}>No tasks due this week.</p>}
+              {allWeek.length>5&&<button onClick={()=>setShowAll(s=>!s)} style={{marginTop:8,fontSize:"12px",color:T.accentMid,background:"none",border:"none",cursor:"pointer",fontFamily:T.sans,padding:0}}>{showAll?`Show less ↑`:`Show all ${allWeek.length} tasks ↓`}</button>}
+            </>);
+          })()}
         </Card>
         {/* FIX #5: Projects card — show all with scroll */}
         <Card>
@@ -1414,16 +1435,36 @@ ${summary}`,500);
           {members.map(m=>{
             const nc=projects.reduce((a,p)=>a+p.notes.filter(n=>n.taggedMembers?.includes(m.id)||n.raw.toLowerCase().includes(m.name.toLowerCase())).length,0);
             const openComm=projects.flatMap(p=>(p.commitments||[]).filter(c=>c.member_id===m.id&&c.status==="open")).length;
+            const [editingM,setEditingM]=React.useState(false);
+            const [eName,setEName]=React.useState(m.name);
+            const [eRole,setERole]=React.useState(m.role||"");
             return(
-              <Card key={m.id} accent={avatarBg(m.name)} style={{cursor:"pointer",marginBottom:0}}>
-                <div onClick={()=>{setActiveMemberId(m.id);setView("memberView");}} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
-                  <Av name={m.name} size={30}/>
-                  <div style={{minWidth:0}}><div style={{fontWeight:600,fontSize:"13px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:T.ink}}>{m.name}</div>{m.role&&<div style={{fontSize:"11px",color:T.muted}}>{m.role}</div>}</div>
-                </div>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:"11px",color:T.muted}}>
-                  <div style={{display:"flex",gap:8}}><span>{nc} notes</span>{openComm>0&&<span style={{color:T.warning}}>⚡ {openComm} open</span>}</div>
-                  <button onClick={e=>{e.stopPropagation();generateShareLink(m.id);}} title="Copy share link" style={{background:"none",border:"none",cursor:"pointer",fontSize:"12px",color:T.accentMid,padding:0,fontFamily:T.sans}}>🔗 Share</button>
-                </div>
+              <Card key={m.id} accent={avatarBg(m.name)} style={{marginBottom:0}}>
+                {editingM?(
+                  <div>
+                    <input value={eName} onChange={e=>setEName(e.target.value)} style={{...inp,marginBottom:6,fontSize:"13px",padding:"5px 8px"}}/>
+                    <input value={eRole} onChange={e=>setERole(e.target.value)} placeholder="Role" style={{...inp,marginBottom:8,fontSize:"13px",padding:"5px 8px"}}/>
+                    <div style={{display:"flex",gap:6}}>
+                      <Btn size="sm" onClick={()=>{editMember(m.id,eName,eRole);setEditingM(false);}}>Save</Btn>
+                      <Btn size="sm" variant="secondary" onClick={()=>setEditingM(false)}>Cancel</Btn>
+                    </div>
+                  </div>
+                ):(
+                  <>
+                    <div onClick={()=>{setActiveMemberId(m.id);setView("memberView");}} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6,cursor:"pointer"}}>
+                      <Av name={m.name} size={30}/>
+                      <div style={{minWidth:0,flex:1}}><div style={{fontWeight:600,fontSize:"13px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:T.ink}}>{m.name}</div>{m.role&&<div style={{fontSize:"11px",color:T.muted}}>{m.role}</div>}</div>
+                    </div>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:"11px",color:T.muted}}>
+                      <div style={{display:"flex",gap:8}}><span>{nc} notes</span>{openComm>0&&<span style={{color:T.warning}}>⚡ {openComm} open</span>}</div>
+                      <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                        <button onClick={e=>{e.stopPropagation();generateShareLink(m.id);}} title="Copy share link" style={{background:"none",border:"none",cursor:"pointer",fontSize:"12px",color:T.accentMid,padding:0,fontFamily:T.sans}}>🔗</button>
+                        <button onClick={e=>{e.stopPropagation();setEName(m.name);setERole(m.role||"");setEditingM(true);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:"12px",color:T.muted,padding:0}} title="Edit">✎</button>
+                        <button onClick={e=>{e.stopPropagation();deleteMember(m.id);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:"13px",color:T.muted,padding:0}} title="Remove">✕</button>
+                      </div>
+                    </div>
+                  </>
+                )}
               </Card>
             );
           })}
