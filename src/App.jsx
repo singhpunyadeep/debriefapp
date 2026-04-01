@@ -207,6 +207,15 @@ const db = {
   },
   async deleteTodo(todoId) { await supabase.from('todos').delete().eq('id',todoId); },
   async upsertHomeSummary(userId,summary) { await supabase.from('home_summaries').upsert({user_id:userId,summary,updated_at:new Date().toISOString()}); },
+  async getDailyFocus(userId) {
+    const today = new Date().toISOString().slice(0,10);
+    const {data} = await supabase.from('daily_focus').select('*').eq('user_id',userId).eq('focus_date',today).maybeSingle();
+    return data;
+  },
+  async saveDailyFocus(userId, tasks) {
+    const today = new Date().toISOString().slice(0,10);
+    await supabase.from('daily_focus').upsert({user_id:userId,focus_date:today,tasks:JSON.stringify(tasks),updated_at:new Date().toISOString()},{onConflict:'user_id,focus_date'});
+  },
   async setName(userId,name) { await supabase.from('profiles').upsert({id:userId,name}); },
   async completeTour(userId) { await supabase.from('profiles').update({tour_done:true}).eq('id',userId); },
 
@@ -276,8 +285,8 @@ const inp = {width:"100%",padding:"9px 11px",border:`1px solid ${T.border}`,bord
 
 const Shell = ({children,maxW=820}) => (
   <div style={{fontFamily:T.sans,minHeight:"100vh",backgroundColor:T.bg,color:T.ink,boxSizing:"border-box",overflowX:"hidden"}}>
-    <div style={{maxWidth:maxW,margin:"0 auto",padding:"28px 16px 80px",boxSizing:"border-box"}}>{children}</div>
-    <div style={{textAlign:"center",padding:"16px",fontSize:"11px",color:T.muted,borderTop:`1px solid ${T.border}`}}>
+    <div style={{maxWidth:maxW,margin:"0 auto",padding:"28px 16px 140px",boxSizing:"border-box"}}>{children}</div>
+    <div style={{textAlign:"center",padding:"16px",fontSize:"11px",color:T.muted,borderTop:`1px solid ${T.border}`,marginBottom:64}}>
       <a href="/privacy.html" style={{color:T.muted,marginRight:16}}>Privacy Policy</a>
       <a href="/terms.html" style={{color:T.muted,marginRight:16}}>Terms of Service</a>
       <a href="/refund.html" style={{color:T.muted}}>Refund Policy</a>
@@ -733,6 +742,130 @@ const InlineAddTask=({projectId,userId,members,onAdd})=>{
         <Btn onClick={submit} disabled={!text.trim()}>Add</Btn>
         <Btn variant="secondary" onClick={()=>setOpen(false)}>Cancel</Btn>
       </div>
+    </div>
+  );
+};
+
+// ─── Fortune Cookies ──────────────────────────────────────────────────────────
+const FORTUNES = [
+  "You cleared the deck. Tomorrow you build the ship. 🚢",
+  "Three done. Momentum is now yours. Don't waste it. ⚡",
+  "The best strategy is execution. You just proved it. 🎯",
+  "Small wins compound. You just made a deposit. 📈",
+  "You did what most people only plan to do. 🏆",
+  "Clarity of action is rare. You have it today. 🌟",
+  "Done is better than perfect. Today you chose done. ✅",
+  "The gap between good and great is consistency. One day closer. 💪",
+  "Your future self just got a little easier. 🙌",
+  "Three things done > thirty things pending. Always. 🔑",
+];
+
+// ─── Win Today component ──────────────────────────────────────────────────────
+const WinToday = ({userId, todos, projects}) => {
+  const [focus, setFocus] = useState(null); // [{todoId, text, projectId, done}]
+  const [loading, setLoading] = useState(true);
+  const [generating, setGenerating] = useState(false);
+  const [fortune, setFortune] = useState(null);
+  const [collapsed, setCollapsed] = useState(false);
+
+  // Load today's focus on mount
+  useEffect(()=>{
+    if(!userId) return;
+    db.getDailyFocus(userId).then(d=>{
+      if(d?.tasks){
+        try{ setFocus(JSON.parse(d.tasks)); }catch{}
+      }
+      setLoading(false);
+    });
+  },[userId]);
+
+  // Check if all done → show fortune
+  useEffect(()=>{
+    if(focus&&focus.length===3&&focus.every(f=>f.done)&&!fortune){
+      setFortune(FORTUNES[Math.floor(Math.random()*FORTUNES.length)]);
+    }
+  },[focus]);
+
+  const generate = async () => {
+    setGenerating(true);
+    try {
+      const open = todos.filter(t=>!t.done);
+      if(open.length===0){ setFocus([]); setGenerating(false); return; }
+      const taskList = open.map(t=>{
+        const p = projects.find(pp=>pp.id===t.projectId);
+        const daysToDeadline = t.dueDate ? Math.floor((new Date(t.dueDate)-Date.now())/(1000*60*60*24)) : null;
+        return `ID:${t.id} | "${t.text}" | project:${p?.name||"none"} | due:${daysToDeadline!==null?daysToDeadline+"d":"no date"} | source:${t.source}`;
+      }).join("\n");
+      const raw = await claude(`You are a productivity coach. Pick exactly 3 tasks for the user to complete TODAY. Prioritise by: 1) overdue first, 2) due soon, 3) quick/easy wins (short text = likely easy), 4) AI-extracted commitments. Return ONLY a valid JSON array of exactly 3 task IDs, no other text:\n["id1","id2","id3"]\n\nOpen tasks:\n${taskList}`, 100);
+      const ids = parseJsonSafe(raw);
+      if(!Array.isArray(ids)||ids.length===0) throw new Error("bad response");
+      const picked = ids.slice(0,3).map(id=>{
+        const t = open.find(tt=>tt.id===id);
+        return t ? {todoId:t.id, text:t.text, projectId:t.projectId, done:false} : null;
+      }).filter(Boolean);
+      if(picked.length===0) throw new Error("no valid tasks");
+      setFocus(picked);
+      setFortune(null);
+      await db.saveDailyFocus(userId, picked);
+    } catch { setFocus([]); }
+    finally { setGenerating(false); }
+  };
+
+  const toggle = async (todoId) => {
+    const updated = focus.map(f=>f.todoId===todoId?{...f,done:!f.done}:f);
+    setFocus(updated);
+    await db.saveDailyFocus(userId, updated);
+  };
+
+  const reset = async () => { setFocus(null); setFortune(null); await generate(); };
+
+  if(loading) return null;
+
+  const allDone = focus&&focus.length>0&&focus.every(f=>f.done);
+  const doneCount = focus ? focus.filter(f=>f.done).length : 0;
+
+  return (
+    <div style={{background:allDone?"#FFFBEB":T.white,border:`1px solid ${allDone?"#F59E0B":T.border}`,borderLeft:`3px solid ${allDone?"#F59E0B":T.accent}`,padding:"14px 18px",marginBottom:10,fontFamily:T.sans,borderRadius:0}}>
+      {/* Header */}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:collapsed?0:10}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer"}} onClick={()=>setCollapsed(c=>!c)}>
+          <span style={{fontSize:"15px"}}>🎯</span>
+          <h2 style={{margin:0,fontFamily:T.serif,fontSize:"15px",fontWeight:700,color:T.ink}}>Win Today</h2>
+          {focus&&focus.length>0&&<span style={{fontSize:"11px",color:allDone?"#F59E0B":T.muted,fontWeight:600}}>{doneCount}/3 done</span>}
+          <span style={{fontSize:"10px",color:T.muted}}>{collapsed?"▼":"▲"}</span>
+        </div>
+        <div style={{display:"flex",gap:6}}>
+          {focus!==null&&<button onClick={reset} disabled={generating} style={{background:"none",border:"none",cursor:"pointer",fontSize:"11px",color:T.muted,fontFamily:T.sans,padding:0}}>{generating?"…":"↻ New picks"}</button>}
+          {focus===null&&<Btn size="sm" onClick={generate} disabled={generating}>{generating?"Picking…":"Pick my 3"}</Btn>}
+        </div>
+      </div>
+
+      {!collapsed&&(<>
+        {/* Fortune cookie */}
+        {allDone&&fortune&&(
+          <div style={{background:"#FEF3C7",border:"1px solid #F59E0B",borderRadius:4,padding:"12px 14px",marginBottom:10,textAlign:"center"}}>
+            <div style={{fontSize:"20px",marginBottom:4}}>🥠</div>
+            <p style={{margin:0,fontSize:"13px",fontWeight:600,color:"#92400E",lineHeight:1.5}}>{fortune}</p>
+          </div>
+        )}
+
+        {/* Task list */}
+        {focus===null&&!generating&&(
+          <p style={{margin:0,fontSize:"13px",color:T.muted}}>Let Debrief pick the 3 easiest wins from your open tasks for today.</p>
+        )}
+        {generating&&<p style={{margin:0,fontSize:"13px",color:T.muted}}>Picking your best 3 for today…</p>}
+        {focus&&focus.length===0&&<p style={{margin:0,fontSize:"13px",color:T.muted}}>No open tasks — you're already ahead! 🎉</p>}
+        {focus&&focus.map((f,i)=>{
+          const proj = projects.find(p=>p.id===f.projectId);
+          return (
+            <div key={f.todoId} style={{display:"flex",alignItems:"center",gap:10,padding:"7px 0",borderBottom:`1px solid ${T.border}`}}>
+              <input type="checkbox" checked={f.done} onChange={()=>toggle(f.todoId)} style={{accentColor:T.accent,cursor:"pointer",flexShrink:0}}/>
+              <span style={{fontSize:"13px",color:f.done?T.muted:T.ink,textDecoration:f.done?"line-through":"none",flex:1,lineHeight:1.4}}>{f.text}</span>
+              {proj&&<span style={{fontSize:"10px",color:T.accentMid,fontWeight:600,textTransform:"uppercase",flexShrink:0}}>{proj.name}</span>}
+            </div>
+          );
+        })}
+      </>)}
     </div>
   );
 };
@@ -1264,6 +1397,8 @@ ${summary}`,500);
           )}
         </Card>
       )}
+
+      <WinToday userId={userId} todos={todos} projects={projects}/>
 
       <Card accent={T.accent} style={{marginBottom:14}}>
         <div id="tour-briefing" style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,gap:8,flexWrap:"wrap"}}>
