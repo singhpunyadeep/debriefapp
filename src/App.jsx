@@ -216,6 +216,18 @@ const db = {
     const today = new Date().toISOString().slice(0,10);
     await supabase.from('daily_focus').upsert({user_id:userId,focus_date:today,tasks:JSON.stringify(tasks),updated_at:new Date().toISOString()},{onConflict:'user_id,focus_date'});
   },
+  async saveWeeklyScore(userId, weekStart, score, breakdown) {
+    await supabase.from('weekly_scores').upsert({user_id:userId,week_start:weekStart,score,breakdown:JSON.stringify(breakdown),updated_at:new Date().toISOString()},{onConflict:'user_id,week_start'});
+  },
+  async getWeeklyScores(userId, limit=10) {
+    const {data} = await supabase.from('weekly_scores').select('*').eq('user_id',userId).order('week_start',{ascending:false}).limit(limit);
+    return (data||[]).map(r=>({...r,breakdown:r.breakdown?JSON.parse(r.breakdown):{}}));
+  },
+  async getDailyFocusRange(userId, days=14) {
+    const since = new Date(); since.setDate(since.getDate()-days);
+    const {data} = await supabase.from('daily_focus').select('*').eq('user_id',userId).gte('focus_date',since.toISOString().slice(0,10)).order('focus_date',{ascending:false});
+    return data||[];
+  },
   async setName(userId,name) { await supabase.from('profiles').upsert({id:userId,name}); },
   async completeTour(userId) { await supabase.from('profiles').update({tour_done:true}).eq('id',userId); },
 
@@ -746,45 +758,184 @@ const InlineAddTask=({projectId,userId,members,onAdd})=>{
   );
 };
 
-// ─── Fortune Cookies ──────────────────────────────────────────────────────────
-const FORTUNES = [
-  "You cleared the deck. Tomorrow you build the ship. 🚢",
-  "Three done. Momentum is now yours. Don't waste it. ⚡",
-  "The best strategy is execution. You just proved it. 🎯",
-  "Small wins compound. You just made a deposit. 📈",
-  "You did what most people only plan to do. 🏆",
-  "Clarity of action is rare. You have it today. 🌟",
-  "Done is better than perfect. Today you chose done. ✅",
-  "The gap between good and great is consistency. One day closer. 💪",
-  "Your future self just got a little easier. 🙌",
-  "Three things done > thirty things pending. Always. 🔑",
-];
+// ─── Score helpers ────────────────────────────────────────────────────────────
+const getWeekStart = (date=new Date()) => {
+  const d = new Date(date); const day = d.getDay()||7;
+  d.setDate(d.getDate()-day+1); d.setHours(0,0,0,0); return d;
+};
+const dateInWeek = (isoString, weekStart) => {
+  if(!isoString) return false;
+  const d = new Date(isoString); const end = new Date(weekStart); end.setDate(end.getDate()+7);
+  return d >= weekStart && d < end;
+};
+const calcScore = (todos, commitments, notes, focusDays) => {
+  const ws = getWeekStart();
+  // Win Today days this week (max 3 days for 30pts)
+  const winDays = focusDays.filter(d=>{
+    if(!dateInWeek(d.focus_date+'T00:00:00', ws)) return false;
+    try{ const tasks=JSON.parse(d.tasks); return tasks.length>0&&tasks.every(t=>t.done); }catch{ return false; }
+  }).length;
+  const winPts = Math.min(winDays,3)*10;
+  // Tasks done this week (max 40pts)
+  const doneTW = todos.filter(t=>t.done&&t.doneAt&&dateInWeek(t.doneAt,ws)).length;
+  const taskPts = Math.min(doneTW*5,40);
+  // Commitments closed this week (max 20pts)
+  const closedTW = commitments.filter(c=>c.status==='done'&&c.date&&dateInWeek(c.date,ws)).length;
+  const commitPts = Math.min(closedTW*5,20);
+  // Notes added this week (max 10pts, 5pts each, max 2)
+  const notesTW = notes.filter(n=>n.date&&dateInWeek(n.date,ws)).length;
+  const notesPts = Math.min(notesTW,2)*5;
+  const total = winPts+taskPts+commitPts+notesPts;
+  return { total, winPts, taskPts, commitPts, notesPts, winDays, doneTW, closedTW, notesTW };
+};
+const scoreLabel = s => s>=85?"Outstanding week":s>=65?"Strong week":s>=40?"Steady progress":"Room to grow";
+const scoreColor = s => s>=65?"#16A34A":s>=40?"#F59E0B":"#DC2626";
+// Sparkline — renders 8 tiny bars
+const Sparkline = ({scores}) => {
+  if(!scores||scores.length<2) return null;
+  const vals = [...scores].reverse().slice(-8).map(s=>s.score);
+  const max = Math.max(...vals,1);
+  return (
+    <div style={{display:"flex",gap:2,alignItems:"flex-end",height:20}}>
+      {vals.map((v,i)=>(
+        <div key={i} style={{width:8,background:scoreColor(v),borderRadius:1,height:`${Math.max(3,Math.round((v/max)*20))}px`,flexShrink:0}}/>
+      ))}
+    </div>
+  );
+};
+
+// ─── Debrief Score component ──────────────────────────────────────────────────
+const DebriefScore = ({userId, todos, projects, data}) => {
+  const [scores, setScores] = useState([]);
+  const [collapsed, setCollapsed] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(()=>{
+    if(!userId) return;
+    const load = async () => {
+      const [weeklyScores, focusDays] = await Promise.all([
+        db.getWeeklyScores(userId, 10),
+        db.getDailyFocusRange(userId, 14),
+      ]);
+      // Calculate this week's score
+      const allCommitments = (data?.projects||[]).flatMap(p=>p.commitments||[]);
+      const allNotes = (data?.projects||[]).flatMap(p=>p.notes||[]);
+      const breakdown = calcScore(todos, allCommitments, allNotes, focusDays);
+      // Save this week's score (upsert — updates as week progresses)
+      const ws = getWeekStart().toISOString().slice(0,10);
+      await db.saveWeeklyScore(userId, ws, breakdown.total, breakdown);
+      // Merge into scores list
+      const existing = weeklyScores.filter(s=>s.week_start!==ws);
+      setScores([{week_start:ws, score:breakdown.total, breakdown}, ...existing]);
+      setLoaded(true);
+    };
+    load();
+  },[userId, todos.length]);
+
+  if(!loaded) return null;
+
+  const thisWeek = scores[0];
+  const lastWeek = scores[1];
+  const delta = thisWeek&&lastWeek ? thisWeek.score-lastWeek.score : null;
+  const s = thisWeek?.score||0;
+  const b = thisWeek?.breakdown||{};
+
+  return (
+    <div style={{background:T.white,border:`1px solid ${T.border}`,borderLeft:`3px solid ${scoreColor(s)}`,padding:"14px 18px",marginBottom:10,fontFamily:T.sans}}>
+      <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",cursor:"pointer"}} onClick={()=>setCollapsed(c=>!c)}>
+        <div>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <h2 style={{margin:0,fontFamily:T.serif,fontSize:"15px",fontWeight:700,color:T.ink}}>Debrief Score</h2>
+            <span style={{fontSize:"22px",fontWeight:700,color:scoreColor(s)}}>{s}</span>
+            {delta!==null&&<span style={{fontSize:"12px",color:delta>=0?T.success:T.danger,fontWeight:600}}>{delta>=0?`↑${delta}`:`↓${Math.abs(delta)}`} vs last week</span>}
+            <span style={{fontSize:"10px",color:T.muted}}>{collapsed?"▼":"▲"}</span>
+          </div>
+          {!collapsed&&<p style={{margin:"3px 0 0",fontSize:"12px",color:scoreColor(s),fontWeight:600,textAlign:"left"}}>{scoreLabel(s)}</p>}
+        </div>
+        {!collapsed&&<Sparkline scores={scores}/>}
+      </div>
+
+      {!collapsed&&(
+        <div style={{marginTop:12}}>
+          {/* Score bar */}
+          <div style={{background:T.border,borderRadius:2,height:6,marginBottom:12,overflow:"hidden"}}>
+            <div style={{background:scoreColor(s),height:"100%",width:`${s}%`,transition:"width 0.4s ease",borderRadius:2}}/>
+          </div>
+          {/* Breakdown rows */}
+          {[
+            {label:"Win Today", pts:b.winPts||0, max:30, detail:`${b.winDays||0}/3 days`},
+            {label:"Tasks done", pts:b.taskPts||0, max:40, detail:`${b.doneTW||0} completed`},
+            {label:"Commitments", pts:b.commitPts||0, max:20, detail:`${b.closedTW||0} closed`},
+            {label:"Meeting notes", pts:b.notesPts||0, max:10, detail:`${b.notesTW||0} added`},
+          ].map(row=>(
+            <div key={row.label} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+              <span style={{fontSize:"12px",color:T.mid,width:110,flexShrink:0,textAlign:"left"}}>{row.label}</span>
+              <div style={{flex:1,background:T.border,borderRadius:2,height:4,overflow:"hidden"}}>
+                <div style={{background:scoreColor(s),height:"100%",width:`${(row.pts/row.max)*100}%`,borderRadius:2}}/>
+              </div>
+              <span style={{fontSize:"11px",color:T.muted,width:60,textAlign:"right",flexShrink:0}}>{row.detail}</span>
+              <span style={{fontSize:"11px",fontWeight:700,color:row.pts>0?scoreColor(s):T.muted,width:32,textAlign:"right",flexShrink:0}}>{row.pts}pt</span>
+            </div>
+          ))}
+          {scores.length>=2&&<p style={{margin:"10px 0 0",fontSize:"11px",color:T.muted,textAlign:"left"}}>Trend: last {Math.min(scores.length,8)} weeks tracked</p>}
+        </div>
+      )}
+    </div>
+  );
+};
 
 // ─── Win Today component ──────────────────────────────────────────────────────
 const WinToday = ({userId, todos, projects}) => {
-  const [focus, setFocus] = useState(null); // [{todoId, text, projectId, done}]
+  const [focus, setFocus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
-  const [fortune, setFortune] = useState(null);
   const [collapsed, setCollapsed] = useState(false);
+  const [streak, setStreak] = useState(0);
+  const [bestStreak, setBestStreak] = useState(0);
 
-  // Load today's focus on mount
+  const computeStreak = (days) => {
+    // days: [{focus_date, tasks}] sorted desc
+    let cur=0, best=0, prev=null;
+    for(const d of [...days].sort((a,b)=>b.focus_date.localeCompare(a.focus_date))) {
+      let allDone=false;
+      try{ const t=JSON.parse(d.tasks); allDone=t.length>0&&t.every(x=>x.done); }catch{}
+      if(allDone){
+        if(prev===null){
+          // Only count if today or yesterday
+          const today=new Date().toISOString().slice(0,10);
+          const yesterday=new Date(Date.now()-86400000).toISOString().slice(0,10);
+          if(d.focus_date===today||d.focus_date===yesterday) cur=1;
+          else cur=0;
+        } else {
+          const expected=new Date(prev); expected.setDate(expected.getDate()-1);
+          if(d.focus_date===expected.toISOString().slice(0,10)) cur++;
+          else cur=0;
+        }
+        if(cur>best) best=cur;
+        prev=d.focus_date;
+      } else {
+        if(cur>best) best=cur;
+        cur=0; prev=d.focus_date;
+      }
+    }
+    if(cur>best) best=cur;
+    return {cur, best};
+  };
+
   useEffect(()=>{
     if(!userId) return;
-    db.getDailyFocus(userId).then(d=>{
-      if(d?.tasks){
-        try{ setFocus(JSON.parse(d.tasks)); }catch{}
-      }
+    const load = async () => {
+      const [focusToday, focusHistory] = await Promise.all([
+        db.getDailyFocus(userId),
+        db.getDailyFocusRange(userId, 60),
+      ]);
+      if(focusToday?.tasks){ try{ setFocus(JSON.parse(focusToday.tasks)); }catch{} }
+      const {cur,best} = computeStreak(focusHistory);
+      setStreak(cur); setBestStreak(best);
       setLoading(false);
-    });
+    };
+    load();
   },[userId]);
-
-  // Check if all done → show fortune
-  useEffect(()=>{
-    if(focus&&focus.length===3&&focus.every(f=>f.done)&&!fortune){
-      setFortune(FORTUNES[Math.floor(Math.random()*FORTUNES.length)]);
-    }
-  },[focus]);
 
   const generate = async () => {
     setGenerating(true);
@@ -796,16 +947,15 @@ const WinToday = ({userId, todos, projects}) => {
         const daysToDeadline = t.dueDate ? Math.floor((new Date(t.dueDate)-Date.now())/(1000*60*60*24)) : null;
         return `ID:${t.id} | "${t.text}" | project:${p?.name||"none"} | due:${daysToDeadline!==null?daysToDeadline+"d":"no date"} | source:${t.source}`;
       }).join("\n");
-      const raw = await claude(`You are a productivity coach. Pick exactly 3 tasks for the user to complete TODAY. Prioritise by: 1) overdue first, 2) due soon, 3) quick/easy wins (short text = likely easy), 4) AI-extracted commitments. Return ONLY a valid JSON array of exactly 3 task IDs, no other text:\n["id1","id2","id3"]\n\nOpen tasks:\n${taskList}`, 100);
-      const ids = parseJsonSafe(raw);
-      if(!Array.isArray(ids)||ids.length===0) throw new Error("bad response");
-      const picked = ids.slice(0,3).map(id=>{
-        const t = open.find(tt=>tt.id===id);
-        return t ? {todoId:t.id, text:t.text, projectId:t.projectId, done:false} : null;
+      const raw = await claude(`You are a productivity coach. Pick exactly 3 tasks for the user to complete TODAY. Prioritise: 1) overdue, 2) due soon, 3) quick/easy wins (short text = easy), 4) AI-extracted commitments. For each pick give a short reason (max 6 words, lowercase). Return ONLY valid JSON, no other text:\n[{"id":"taskid","reason":"overdue by 2 days"},{"id":"taskid","reason":"quick win, 5 mins"},{"id":"taskid","reason":"due tomorrow"}]\n\nOpen tasks:\n${taskList}`, 200);
+      const picks = parseJsonSafe(raw);
+      if(!Array.isArray(picks)||picks.length===0) throw new Error("bad response");
+      const picked = picks.slice(0,3).map(pick=>{
+        const t = open.find(tt=>tt.id===pick.id);
+        return t ? {todoId:t.id, text:t.text, projectId:t.projectId, done:false, reason:pick.reason||""} : null;
       }).filter(Boolean);
       if(picked.length===0) throw new Error("no valid tasks");
       setFocus(picked);
-      setFortune(null);
       await db.saveDailyFocus(userId, picked);
     } catch { setFocus([]); }
     finally { setGenerating(false); }
@@ -817,7 +967,7 @@ const WinToday = ({userId, todos, projects}) => {
     await db.saveDailyFocus(userId, updated);
   };
 
-  const reset = async () => { setFocus(null); setFortune(null); await generate(); };
+  const reset = async () => { setFocus(null); await generate(); };
 
   if(loading) return null;
 
@@ -825,43 +975,48 @@ const WinToday = ({userId, todos, projects}) => {
   const doneCount = focus ? focus.filter(f=>f.done).length : 0;
 
   return (
-    <div style={{background:allDone?"#FFFBEB":T.white,border:`1px solid ${allDone?"#F59E0B":T.border}`,borderLeft:`3px solid ${allDone?"#F59E0B":T.accent}`,padding:"14px 18px",marginBottom:10,fontFamily:T.sans,borderRadius:0}}>
-      {/* Header */}
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:collapsed?0:10}}>
-        <div style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer"}} onClick={()=>setCollapsed(c=>!c)}>
-          <span style={{fontSize:"15px"}}>🎯</span>
-          <h2 style={{margin:0,fontFamily:T.serif,fontSize:"15px",fontWeight:700,color:T.ink}}>Win Today</h2>
-          {focus&&focus.length>0&&<span style={{fontSize:"11px",color:allDone?"#F59E0B":T.muted,fontWeight:600}}>{doneCount}/3 done</span>}
-          <span style={{fontSize:"10px",color:T.muted}}>{collapsed?"▼":"▲"}</span>
+    <div style={{background:allDone?"#FFFBEB":T.white,border:`1px solid ${allDone?"#F59E0B":T.border}`,borderLeft:`3px solid ${allDone?"#F59E0B":T.accent}`,padding:"14px 18px",marginBottom:10,fontFamily:T.sans}}>
+      <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:collapsed?0:8}}>
+        <div style={{cursor:"pointer",flex:1}} onClick={()=>setCollapsed(c=>!c)}>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <h2 style={{margin:0,fontFamily:T.serif,fontSize:"15px",fontWeight:700,color:T.ink}}>Win Today</h2>
+            {focus&&focus.length>0&&<span style={{fontSize:"11px",color:allDone?"#D97706":T.muted,fontWeight:600}}>{doneCount}/3</span>}
+            {streak>0&&<span style={{fontSize:"12px",fontWeight:700,color:"#D97706"}}>🔥{streak}</span>}
+            <span style={{fontSize:"10px",color:T.muted}}>{collapsed?"▼":"▲"}</span>
+          </div>
+          {!collapsed&&<p style={{margin:"3px 0 0",fontSize:"12px",color:T.muted,textAlign:"left"}}>Your 3 best bets for today — picked by Debrief. Clear all 3 and unlock your daily score.{bestStreak>1&&<span style={{color:T.muted}}> Best streak: {bestStreak} days.</span>}</p>}
         </div>
-        <div style={{display:"flex",gap:6}}>
-          {focus!==null&&<button onClick={reset} disabled={generating} style={{background:"none",border:"none",cursor:"pointer",fontSize:"11px",color:T.muted,fontFamily:T.sans,padding:0}}>{generating?"…":"↻ New picks"}</button>}
+        <div style={{display:"flex",gap:6,flexShrink:0,marginLeft:12}}>
+          {focus!==null&&<button onClick={reset} disabled={generating} style={{background:"none",border:"none",cursor:"pointer",fontSize:"11px",color:T.muted,fontFamily:T.sans,padding:0}}>{generating?"…":"↻ Repick"}</button>}
           {focus===null&&<Btn size="sm" onClick={generate} disabled={generating}>{generating?"Picking…":"Pick my 3"}</Btn>}
         </div>
       </div>
 
       {!collapsed&&(<>
-        {/* Fortune cookie */}
-        {allDone&&fortune&&(
-          <div style={{background:"#FEF3C7",border:"1px solid #F59E0B",borderRadius:4,padding:"12px 14px",marginBottom:10,textAlign:"center"}}>
-            <div style={{fontSize:"20px",marginBottom:4}}>🥠</div>
-            <p style={{margin:0,fontSize:"13px",fontWeight:600,color:"#92400E",lineHeight:1.5}}>{fortune}</p>
+        {/* All done celebration */}
+        {allDone&&(
+          <div style={{background:"#FEF3C7",border:"1px solid #F59E0B",borderRadius:4,padding:"10px 14px",marginBottom:10,textAlign:"left"}}>
+            <p style={{margin:0,fontSize:"13px",fontWeight:700,color:"#92400E"}}>All 3 done. Check your score below.</p>
           </div>
         )}
-
-        {/* Task list */}
-        {focus===null&&!generating&&(
-          <p style={{margin:0,fontSize:"13px",color:T.muted}}>Let Debrief pick the 3 easiest wins from your open tasks for today.</p>
-        )}
-        {generating&&<p style={{margin:0,fontSize:"13px",color:T.muted}}>Picking your best 3 for today…</p>}
-        {focus&&focus.length===0&&<p style={{margin:0,fontSize:"13px",color:T.muted}}>No open tasks — you're already ahead! 🎉</p>}
-        {focus&&focus.map((f,i)=>{
+        {focus===null&&!generating&&<p style={{margin:0,fontSize:"13px",color:T.muted,textAlign:"left"}}>Debrief will look at your open tasks and pick the 3 smartest things to do today.</p>}
+        {generating&&<p style={{margin:0,fontSize:"13px",color:T.muted,textAlign:"left"}}>Picking your best 3 for today…</p>}
+        {focus&&focus.length===0&&<p style={{margin:0,fontSize:"13px",color:T.muted,textAlign:"left"}}>No open tasks — you're already ahead!</p>}
+        {focus&&focus.map((f)=>{
           const proj = projects.find(p=>p.id===f.projectId);
+          // Keep in sync with todos — check live done status
+          const liveTodo = todos.find(t=>t.id===f.todoId);
+          const isDone = f.done || (liveTodo&&liveTodo.done);
           return (
-            <div key={f.todoId} style={{display:"flex",alignItems:"center",gap:10,padding:"7px 0",borderBottom:`1px solid ${T.border}`}}>
-              <input type="checkbox" checked={f.done} onChange={()=>toggle(f.todoId)} style={{accentColor:T.accent,cursor:"pointer",flexShrink:0}}/>
-              <span style={{fontSize:"13px",color:f.done?T.muted:T.ink,textDecoration:f.done?"line-through":"none",flex:1,lineHeight:1.4}}>{f.text}</span>
-              {proj&&<span style={{fontSize:"10px",color:T.accentMid,fontWeight:600,textTransform:"uppercase",flexShrink:0}}>{proj.name}</span>}
+            <div key={f.todoId} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"8px 0",borderBottom:`1px solid ${T.border}`}}>
+              <input type="checkbox" checked={isDone} onChange={()=>toggle(f.todoId)} style={{marginTop:3,accentColor:T.accent,cursor:"pointer",flexShrink:0}}/>
+              <div style={{flex:1,minWidth:0,textAlign:"left"}}>
+                <span style={{fontSize:"13px",color:isDone?T.muted:T.ink,textDecoration:isDone?"line-through":"none",lineHeight:1.4,display:"block"}}>{f.text}</span>
+                <div style={{display:"flex",gap:6,marginTop:2,flexWrap:"wrap",alignItems:"center"}}>
+                  {f.reason&&<span style={{fontSize:"11px",color:T.muted}}>({f.reason})</span>}
+                  {proj&&<span style={{fontSize:"10px",color:T.accentMid,fontWeight:600,textTransform:"uppercase"}}>{proj.name}</span>}
+                </div>
+              </div>
             </div>
           );
         })}
@@ -1361,44 +1516,8 @@ ${summary}`,500);
       <BottomSearchBar onClick={()=>setShowSearch(true)}/>
       <Nav/>
 
-      {/* FIX #5/#6: Risk Radar — show all with scroll + refresh button */}
-      {undismissedRisks.length>0&&(
-        <Card style={{marginBottom:14,borderLeft:`3px solid ${T.danger}`}}>
-          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
-            <div style={{display:"flex",alignItems:"center",gap:8}}>
-              <span style={{fontSize:"16px"}}>⚠</span>
-              <h2 style={{margin:0,fontFamily:T.serif,fontSize:"15px",fontWeight:700,color:T.danger}}>Risk Radar</h2>
-              <span style={{background:T.danger+"14",color:T.danger,borderRadius:2,padding:"1px 7px",fontSize:"11px",fontWeight:700}}>{undismissedRisks.length} active</span>
-            </div>
-            <Btn variant="ghost" size="sm" onClick={async()=>{
-              setRiskLoading(true);
-              try{ const d=await db.loadAll(userId); for(const p of d.projects) if(p.notes.length>0) await reevaluateRisks(p.id,p,userId); await reload(); }
-              finally{ setRiskLoading(false); }
-            }} disabled={riskLoading}>{riskLoading?"Re-evaluating…":"↻ Re-evaluate all"}</Btn>
-          </div>
-          {/* FIX #5: show all or just 4 */}
-          {(showAllRisks ? undismissedRisks : undismissedRisks.slice(0,4)).map(r=>{
-            const proj=projects.find(p=>p.id===r.project_id);
-            return(
-              <div key={r.id} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"7px 0",borderBottom:`1px solid ${T.border}`}}>
-                <SeverityBadge severity={r.severity}/>
-                <div style={{flex:1,minWidth:0}}>
-                  <p style={{margin:0,fontSize:"13px",color:T.ink,lineHeight:1.4}}>{r.risk_text}</p>
-                  {proj&&<span style={{fontSize:"11px",color:T.muted}}>{proj.name}</span>}
-                </div>
-                <button onClick={()=>db.dismissRisk(r.id).then(reload)} style={{background:"none",border:"none",color:T.muted,cursor:"pointer",fontSize:12,padding:0,flexShrink:0,whiteSpace:"nowrap"}}>Dismiss</button>
-              </div>
-            );
-          })}
-          {undismissedRisks.length>4&&(
-            <button onClick={()=>setShowAllRisks(s=>!s)} style={{marginTop:8,fontSize:"12px",color:T.accentMid,background:"none",border:"none",cursor:"pointer",fontFamily:T.sans,padding:0}}>
-              {showAllRisks?`Show less ↑`:`Show all ${undismissedRisks.length} risks ↓`}
-            </button>
-          )}
-        </Card>
-      )}
-
       <WinToday userId={userId} todos={todos} projects={projects}/>
+      <DebriefScore userId={userId} todos={todos} projects={projects} data={data}/>
 
       <Card accent={T.accent} style={{marginBottom:14}}>
         <div id="tour-briefing" style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,gap:8,flexWrap:"wrap"}}>
@@ -1456,6 +1575,41 @@ ${summary}`,500);
             </>}
         </Card>
       </div>
+
+      {/* Risk Radar — bottom of home screen */}
+      {undismissedRisks.length>0&&(
+        <Card style={{marginTop:12,borderLeft:`3px solid ${T.danger}`}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <h2 style={{margin:0,fontFamily:T.serif,fontSize:"15px",fontWeight:700,color:T.danger}}>Risk Radar</h2>
+              <span style={{background:T.danger+"14",color:T.danger,borderRadius:2,padding:"1px 7px",fontSize:"11px",fontWeight:700}}>{undismissedRisks.length} active</span>
+            </div>
+            <Btn variant="ghost" size="sm" onClick={async()=>{
+              setRiskLoading(true);
+              try{ const d=await db.loadAll(userId); for(const p of d.projects) if(p.notes.length>0) await reevaluateRisks(p.id,p,userId); await reload(); }
+              finally{ setRiskLoading(false); }
+            }} disabled={riskLoading}>{riskLoading?"Re-evaluating…":"↻ Re-evaluate all"}</Btn>
+          </div>
+          {(showAllRisks ? undismissedRisks : undismissedRisks.slice(0,4)).map(r=>{
+            const proj=projects.find(p=>p.id===r.project_id);
+            return(
+              <div key={r.id} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"7px 0",borderBottom:`1px solid ${T.border}`}}>
+                <SeverityBadge severity={r.severity}/>
+                <div style={{flex:1,minWidth:0,textAlign:"left"}}>
+                  <p style={{margin:0,fontSize:"13px",color:T.ink,lineHeight:1.4,textAlign:"left"}}>{r.risk_text}</p>
+                  {proj&&<span style={{fontSize:"11px",color:T.muted}}>{proj.name}</span>}
+                </div>
+                <button onClick={()=>db.dismissRisk(r.id).then(reload)} style={{background:"none",border:"none",color:T.muted,cursor:"pointer",fontSize:12,padding:0,flexShrink:0,whiteSpace:"nowrap"}}>Dismiss</button>
+              </div>
+            );
+          })}
+          {undismissedRisks.length>4&&(
+            <button onClick={()=>setShowAllRisks(s=>!s)} style={{marginTop:8,fontSize:"12px",color:T.accentMid,background:"none",border:"none",cursor:"pointer",fontFamily:T.sans,padding:0}}>
+              {showAllRisks?`Show less ↑`:`Show all ${undismissedRisks.length} risks ↓`}
+            </button>
+          )}
+        </Card>
+      )}
     </Shell>
   );
 
