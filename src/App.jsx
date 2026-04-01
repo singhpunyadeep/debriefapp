@@ -805,82 +805,138 @@ const Sparkline = ({scores}) => {
 };
 
 // ─── Debrief Score component ──────────────────────────────────────────────────
-const DebriefScore = ({userId, todos, projects, data}) => {
+// ─── Score Page ───────────────────────────────────────────────────────────────
+const ScorePage = ({userId, todos, data, onBack}) => {
   const [scores, setScores] = useState([]);
-  const [collapsed, setCollapsed] = useState(false);
+  const [focusDays, setFocusDays] = useState([]);
   const [loaded, setLoaded] = useState(false);
 
   useEffect(()=>{
     if(!userId) return;
     const load = async () => {
-      const [weeklyScores, focusDays] = await Promise.all([
-        db.getWeeklyScores(userId, 10),
-        db.getDailyFocusRange(userId, 14),
+      const [weeklyScores, days] = await Promise.all([
+        db.getWeeklyScores(userId, 12),
+        db.getDailyFocusRange(userId, 90),
       ]);
-      // Calculate this week's score
       const allCommitments = (data?.projects||[]).flatMap(p=>p.commitments||[]);
       const allNotes = (data?.projects||[]).flatMap(p=>p.notes||[]);
-      const breakdown = calcScore(todos, allCommitments, allNotes, focusDays);
-      // Save this week's score (upsert — updates as week progresses)
+      const breakdown = calcScore(todos, allCommitments, allNotes, days);
       const ws = getWeekStart().toISOString().slice(0,10);
       await db.saveWeeklyScore(userId, ws, breakdown.total, breakdown);
-      // Merge into scores list
       const existing = weeklyScores.filter(s=>s.week_start!==ws);
-      setScores([{week_start:ws, score:breakdown.total, breakdown}, ...existing]);
-      setLoaded(true);
+      const all = [{week_start:ws,score:breakdown.total,breakdown},...existing];
+      setScores(all); setFocusDays(days); setLoaded(true);
     };
     load();
-  },[userId, todos.length]);
+  },[userId]);
 
-  if(!loaded) return null;
+  // Compute streak
+  const {cur:streak, best:bestStreak} = (() => {
+    let cur=0,best=0,prev=null;
+    for(const d of [...focusDays].sort((a,b)=>b.focus_date.localeCompare(a.focus_date))){
+      let allDone=false;
+      try{ const t=JSON.parse(d.tasks); allDone=t.length>0&&t.every(x=>x.done); }catch{}
+      if(allDone){
+        if(prev===null){ const today=new Date().toISOString().slice(0,10); const yesterday=new Date(Date.now()-86400000).toISOString().slice(0,10); cur=(d.focus_date===today||d.focus_date===yesterday)?1:0; }
+        else{ const exp=new Date(prev); exp.setDate(exp.getDate()-1); cur=d.focus_date===exp.toISOString().slice(0,10)?cur+1:0; }
+        if(cur>best)best=cur; prev=d.focus_date;
+      } else { if(cur>best)best=cur; cur=0; prev=d.focus_date; }
+    }
+    return {cur,best:Math.max(best,cur)};
+  })();
 
   const thisWeek = scores[0];
   const lastWeek = scores[1];
-  const delta = thisWeek&&lastWeek ? thisWeek.score-lastWeek.score : null;
   const s = thisWeek?.score||0;
   const b = thisWeek?.breakdown||{};
+  const delta = thisWeek&&lastWeek ? thisWeek.score-lastWeek.score : null;
+  const totalTasksDone = todos.filter(t=>t.done&&t.doneAt).length;
+  const totalNotes = (data?.projects||[]).flatMap(p=>p.notes||[]).length;
 
   return (
-    <div style={{background:T.white,border:`1px solid ${T.border}`,borderLeft:`3px solid ${scoreColor(s)}`,padding:"14px 18px",marginBottom:10,fontFamily:T.sans}}>
-      <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",cursor:"pointer"}} onClick={()=>setCollapsed(c=>!c)}>
-        <div>
-          <div style={{display:"flex",alignItems:"center",gap:8}}>
-            <h2 style={{margin:0,fontFamily:T.serif,fontSize:"15px",fontWeight:700,color:T.ink}}>Debrief Score</h2>
-            <span style={{fontSize:"22px",fontWeight:700,color:scoreColor(s)}}>{s}</span>
-            {delta!==null&&<span style={{fontSize:"12px",color:delta>=0?T.success:T.danger,fontWeight:600}}>{delta>=0?`↑${delta}`:`↓${Math.abs(delta)}`} vs last week</span>}
-            <span style={{fontSize:"10px",color:T.muted}}>{collapsed?"▼":"▲"}</span>
-          </div>
-          {!collapsed&&<p style={{margin:"3px 0 0",fontSize:"12px",color:scoreColor(s),fontWeight:600,textAlign:"left"}}>{scoreLabel(s)}</p>}
-        </div>
-        {!collapsed&&<Sparkline scores={scores}/>}
+    <Shell>
+      <div style={{marginBottom:24,paddingBottom:14,borderBottom:`1px solid ${T.border}`,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <Logo onClick={onBack}/>
+        <button onClick={onBack} style={{fontSize:"12px",color:T.mid,background:"none",border:"none",cursor:"pointer",fontFamily:T.sans}}>← Back</button>
       </div>
 
-      {!collapsed&&(
-        <div style={{marginTop:12}}>
-          {/* Score bar */}
-          <div style={{background:T.border,borderRadius:2,height:6,marginBottom:12,overflow:"hidden"}}>
-            <div style={{background:scoreColor(s),height:"100%",width:`${s}%`,transition:"width 0.4s ease",borderRadius:2}}/>
+      {!loaded ? <p style={{color:T.muted,fontSize:"13px"}}>Loading your score…</p> : <>
+        {/* Hero score */}
+        <div style={{textAlign:"center",padding:"24px 0 20px"}}>
+          <div style={{fontSize:"64px",fontWeight:700,color:scoreColor(s),lineHeight:1}}>{s}</div>
+          <div style={{fontSize:"15px",fontWeight:600,color:scoreColor(s),marginTop:4}}>{scoreLabel(s)}</div>
+          {delta!==null&&<div style={{fontSize:"12px",color:delta>=0?T.success:T.danger,marginTop:6}}>{delta>=0?`↑${delta} pts vs last week`:`↓${Math.abs(delta)} pts vs last week`}</div>}
+          <div style={{display:"flex",justifyContent:"center",gap:24,marginTop:16}}>
+            <div style={{textAlign:"center"}}><div style={{fontSize:"22px",fontWeight:700,color:streak>0?"#D97706":T.muted}}>{streak>0?`🔥${streak}`:"-"}</div><div style={{fontSize:"11px",color:T.muted}}>Current streak</div></div>
+            <div style={{textAlign:"center"}}><div style={{fontSize:"22px",fontWeight:700,color:T.ink}}>{bestStreak}</div><div style={{fontSize:"11px",color:T.muted}}>Best streak</div></div>
+            <div style={{textAlign:"center"}}><div style={{fontSize:"22px",fontWeight:700,color:T.ink}}>{totalTasksDone}</div><div style={{fontSize:"11px",color:T.muted}}>Tasks done ever</div></div>
+            <div style={{textAlign:"center"}}><div style={{fontSize:"22px",fontWeight:700,color:T.ink}}>{totalNotes}</div><div style={{fontSize:"11px",color:T.muted}}>Notes added</div></div>
           </div>
-          {/* Breakdown rows */}
+        </div>
+
+        {/* This week breakdown */}
+        <Card accent={scoreColor(s)} style={{marginBottom:10}}>
+          <h3 style={{margin:"0 0 12px",fontSize:"13px",fontWeight:700,color:T.ink}}>This week</h3>
+          <div style={{background:T.border,borderRadius:2,height:6,marginBottom:14,overflow:"hidden"}}>
+            <div style={{background:scoreColor(s),height:"100%",width:`${s}%`,borderRadius:2}}/>
+          </div>
           {[
-            {label:"Win Today", pts:b.winPts||0, max:30, detail:`${b.winDays||0}/3 days`},
-            {label:"Tasks done", pts:b.taskPts||0, max:40, detail:`${b.doneTW||0} completed`},
-            {label:"Commitments", pts:b.commitPts||0, max:20, detail:`${b.closedTW||0} closed`},
+            {label:"Win Today days", pts:b.winPts||0, max:30, detail:`${b.winDays||0}/3 days`},
+            {label:"Tasks completed", pts:b.taskPts||0, max:40, detail:`${b.doneTW||0} done`},
+            {label:"Commitments closed", pts:b.commitPts||0, max:20, detail:`${b.closedTW||0} closed`},
             {label:"Meeting notes", pts:b.notesPts||0, max:10, detail:`${b.notesTW||0} added`},
           ].map(row=>(
-            <div key={row.label} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
-              <span style={{fontSize:"12px",color:T.mid,width:110,flexShrink:0,textAlign:"left"}}>{row.label}</span>
+            <div key={row.label} style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+              <span style={{fontSize:"12px",color:T.mid,width:140,flexShrink:0}}>{row.label}</span>
               <div style={{flex:1,background:T.border,borderRadius:2,height:4,overflow:"hidden"}}>
-                <div style={{background:scoreColor(s),height:"100%",width:`${(row.pts/row.max)*100}%`,borderRadius:2}}/>
+                <div style={{background:row.pts>0?scoreColor(s):T.border,height:"100%",width:`${(row.pts/row.max)*100}%`,borderRadius:2}}/>
               </div>
               <span style={{fontSize:"11px",color:T.muted,width:60,textAlign:"right",flexShrink:0}}>{row.detail}</span>
               <span style={{fontSize:"11px",fontWeight:700,color:row.pts>0?scoreColor(s):T.muted,width:32,textAlign:"right",flexShrink:0}}>{row.pts}pt</span>
             </div>
           ))}
-          {scores.length>=2&&<p style={{margin:"10px 0 0",fontSize:"11px",color:T.muted,textAlign:"left"}}>Trend: last {Math.min(scores.length,8)} weeks tracked</p>}
-        </div>
-      )}
-    </div>
+        </Card>
+
+        {/* Trend — last 12 weeks */}
+        {scores.length>1&&(
+          <Card>
+            <h3 style={{margin:"0 0 14px",fontSize:"13px",fontWeight:700,color:T.ink}}>Trend — last {scores.length} weeks</h3>
+            <div style={{display:"flex",gap:4,alignItems:"flex-end",height:60}}>
+              {[...scores].reverse().map((sc,i)=>{
+                const isCurrentWeek = i===scores.length-1;
+                return(
+                  <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
+                    <div style={{width:"100%",background:isCurrentWeek?scoreColor(sc.score):scoreColor(sc.score)+"80",borderRadius:"2px 2px 0 0",height:`${Math.max(4,Math.round((sc.score/100)*56))}px`}}/>
+                    <span style={{fontSize:"9px",color:isCurrentWeek?T.ink:T.muted,fontWeight:isCurrentWeek?700:400}}>{sc.score}</span>
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",marginTop:4}}>
+              <span style={{fontSize:"10px",color:T.muted}}>{scores.length} weeks ago</span>
+              <span style={{fontSize:"10px",color:T.ink,fontWeight:600}}>This week</span>
+            </div>
+          </Card>
+        )}
+
+        {/* Plain English insights */}
+        <Card style={{marginTop:4}}>
+          <h3 style={{margin:"0 0 10px",fontSize:"13px",fontWeight:700,color:T.ink}}>Insights</h3>
+          {[
+            b.winDays===3 && "You completed all 3 Win Today tasks every day this week. That's a perfect week.",
+            b.winDays===0 && scores.length>1 && "You haven't started Win Today this week. Pick your 3 on the Home screen.",
+            b.doneTW>0 && `You completed ${b.doneTW} task${b.doneTW!==1?"s":""} this week.`,
+            delta!==null && delta>0 && `Your score is up ${delta} points from last week. Momentum building.`,
+            delta!==null && delta<0 && `Your score dropped ${Math.abs(delta)} points from last week. Win Today can help recover it.`,
+            streak>3 && `You're on a ${streak}-day Win Today streak. Don't break it.`,
+            bestStreak>0 && streak===0 && `Your best streak was ${bestStreak} days. Start again today.`,
+            scores.length>=4 && (()=>{ const avg=Math.round(scores.slice(0,4).reduce((a,s)=>a+s.score,0)/Math.min(scores.length,4)); return `Your 4-week average is ${avg} pts (${scoreLabel(avg).toLowerCase()}).`; })(),
+          ].filter(Boolean).map((insight,i)=>(
+            <p key={i} style={{margin:"0 0 8px",fontSize:"13px",color:T.mid,lineHeight:1.5,textAlign:"left"}}>— {insight}</p>
+          ))}
+        </Card>
+      </>}
+    </Shell>
   );
 };
 
@@ -1083,6 +1139,7 @@ export default function App() {
   const [editingNote,setEditingNote]=useState(null);
   const [editSaving,setEditSaving]=useState(false);
   const [view,setView]=useState("home");
+  const [navScore,setNavScore]=useState(null); // {score, color} — shown in nav bar
   const [activeIdx,setActiveIdx]=useState(null);
   const [activeMemberId,setActiveMemberId]=useState(null);
   const [loading,setLoading]=useState(false);
@@ -1146,6 +1203,21 @@ export default function App() {
   const undismissedRisks=allRisks.filter(r=>!r.dismissed);
 
   const reload=async()=>{ if(!userId)return null; const d=await db.loadAll(userId); setData(d); return d; };
+
+  // Compute nav score badge on mount — fire and forget, doesn't block anything
+  useEffect(()=>{
+    if(!userId) return;
+    (async()=>{
+      try{
+        const [d, focusDays] = await Promise.all([db.loadAll(userId), db.getDailyFocusRange(userId,14)]);
+        const allCommitments=(d.projects||[]).flatMap(p=>p.commitments||[]);
+        const allNotes=(d.projects||[]).flatMap(p=>p.notes||[]);
+        const allTodos=(d.todos||[]).map(t=>({...t,doneAt:t.done_at}));
+        const {total}=calcScore(allTodos,allCommitments,allNotes,focusDays);
+        setNavScore({score:total,color:scoreColor(total)});
+      }catch{}
+    })();
+  },[userId]);
   const meInNotes=text=>data?.me&&text.toLowerCase().includes(data.me.toLowerCase());
   const extractMentions=text=>members.filter(m=>text.toLowerCase().includes(m.name.toLowerCase())||text.includes(`@${m.name}`));
 
@@ -1470,6 +1542,11 @@ ${summary}`,500);
       </div>
       <div style={{display:"flex",alignItems:"center",gap:8}}>
         {data?.me&&<div style={{display:"flex",alignItems:"center",gap:5}}><Av name={data.me} size={22} isSelf/><span style={{fontSize:"12px",color:T.mid}}>{data.me}</span></div>}
+        {navScore!==null&&(
+          <div onClick={()=>setView("score")} title="Debrief Score — click for details" style={{cursor:"pointer",background:navScore.color+"18",border:`1px solid ${navScore.color}40`,borderRadius:3,padding:"2px 8px",display:"flex",alignItems:"center",gap:4}}>
+            <span style={{fontSize:"12px",fontWeight:700,color:navScore.color}}>{navScore.score}</span>
+          </div>
+        )}
         {undismissedRisks.length>0&&(
           <div onClick={()=>setView("home")} style={{position:"relative",cursor:"pointer"}} title={`${undismissedRisks.length} active risk${undismissedRisks.length>1?"s":""}`}>
             <span style={{fontSize:"13px",color:T.danger}}>⚠</span>
@@ -1507,6 +1584,8 @@ ${summary}`,500);
   </>);
 
   // ── HOME ──────────────────────────────────────────────────────────────────
+  if(view==="score") return <ScorePage userId={userId} todos={todos} data={data} onBack={()=>setView("home")}/>;
+
   if(view==="home") return (
     <Shell>
       {toast&&<Toast message={toast} onDone={()=>setToast(null)}/>}
@@ -1517,7 +1596,6 @@ ${summary}`,500);
       <Nav/>
 
       <WinToday userId={userId} todos={todos} projects={projects}/>
-      <DebriefScore userId={userId} todos={todos} projects={projects} data={data}/>
 
       <Card accent={T.accent} style={{marginBottom:14}}>
         <div id="tour-briefing" style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,gap:8,flexWrap:"wrap"}}>
