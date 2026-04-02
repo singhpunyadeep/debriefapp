@@ -301,7 +301,8 @@ const Shell = ({children,maxW=820}) => (
     <div style={{textAlign:"center",padding:"16px",fontSize:"11px",color:T.muted,borderTop:`1px solid ${T.border}`,marginBottom:64}}>
       <a href="/privacy.html" style={{color:T.muted,marginRight:16}}>Privacy Policy</a>
       <a href="/terms.html" style={{color:T.muted,marginRight:16}}>Terms of Service</a>
-      <a href="/refund.html" style={{color:T.muted}}>Refund Policy</a>
+      <a href="/refund.html" style={{color:T.muted,marginRight:16}}>Refund Policy</a>
+      <span onClick={()=>{}} style={{color:T.muted,cursor:"pointer"}} id="pricing-link">Pricing</span>
     </div>
   </div>
 );
@@ -1531,12 +1532,12 @@ ${summary}`,500);
   // ─── Nav (FIX #1: added Projects tab) ────────────────────────────────────────
   const Nav=()=>(
     <div style={{marginBottom:24,paddingBottom:14,borderBottom:`1px solid ${T.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
-      <div style={{display:"flex",alignItems:"center",gap:16}}>
+      <div style={{display:"flex",alignItems:"center",gap:12,minWidth:0,flex:"1 1 auto",overflowX:"auto"}}>
         <Logo onClick={()=>setView("home")}/>
-        <div id="tour-nav" style={{display:"flex",gap:0,flexWrap:"wrap"}}>
+        <div id="tour-nav" style={{display:"flex",gap:0,flexShrink:0}}>
           {/* FIX #1: Projects tab added */}
           {[["home","Home"],["projects","Projects"],["todos","My Tasks"],["team","Team"]].map(([v,label])=>(
-            <button key={v} onClick={()=>setView(v)} style={{padding:"5px 12px",fontSize:"13px",fontWeight:view===v?700:400,color:view===v?T.accent:T.mid,background:"transparent",border:"none",borderBottom:view===v?`2px solid ${T.accent}`:"2px solid transparent",cursor:"pointer",fontFamily:T.sans}}>{label}</button>
+            <button key={v} onClick={()=>setView(v)} style={{padding:"5px 10px",fontSize:"13px",fontWeight:view===v?700:400,color:view===v?T.accent:T.mid,background:"transparent",border:"none",borderBottom:view===v?`2px solid ${T.accent}`:"2px solid transparent",cursor:"pointer",fontFamily:T.sans,whiteSpace:"nowrap"}}>{label}</button>
           ))}
         </div>
       </div>
@@ -1556,7 +1557,8 @@ ${summary}`,500);
         <div id="tour-project">
           <Btn size="sm" onClick={()=>{setNewProjName("");setNewProjContext("");setNewProjDeadline("");setView("newProject");}}>+ Project</Btn>
         </div>
-        <Btn size="sm" variant="secondary" onClick={signOut}>Sign out</Btn>
+        <Btn size="sm" variant="secondary" onClick={()=>setView("pricing")} style={{fontSize:"11px",padding:"4px 8px"}}>Pricing</Btn>
+        <Btn size="sm" variant="secondary" onClick={signOut} style={{fontSize:"11px",padding:"4px 8px"}}>Sign out</Btn>
       </div>
     </div>
   );
@@ -1586,6 +1588,40 @@ ${summary}`,500);
   // ── HOME ──────────────────────────────────────────────────────────────────
   if(view==="score") return <ScorePage userId={userId} todos={todos} data={data} onBack={()=>setView("home")}/>;
 
+  if(view==="pricing") return (
+    <Shell maxW={560}>
+      <div style={{textAlign:"center",padding:"32px 0 24px"}}>
+        <Logo onClick={()=>setView("home")}/>
+        <h1 style={{margin:"20px 0 8px",fontFamily:T.serif,fontSize:"26px",fontWeight:700,color:T.ink}}>Simple, honest pricing</h1>
+        <p style={{margin:0,fontSize:"14px",color:T.muted}}>One plan. Everything included. Cancel any time.</p>
+      </div>
+      <Card style={{maxWidth:400,margin:"0 auto 16px",borderTop:`3px solid ${T.accent}`}}>
+        <div style={{textAlign:"center",marginBottom:20}}>
+          <div style={{display:"flex",alignItems:"baseline",justifyContent:"center",gap:4}}>
+            <span style={{fontFamily:T.serif,fontSize:"42px",fontWeight:700,color:T.ink}}>₹599</span>
+            <span style={{fontSize:"14px",color:T.muted}}>/month</span>
+          </div>
+          <div style={{fontSize:"13px",color:T.muted,marginTop:2}}>$7/month for international users</div>
+        </div>
+        {["Project-level meeting intelligence","AI summaries, decisions & risk extraction","Commitment tracking across meetings","Pre-meeting briefings","Team member profiles & reliability scores","Win Today daily focus + Debrief Score","Shareable task links","Unlimited projects & notes"].map(f=>(
+          <div key={f} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 0",borderBottom:`1px solid ${T.border}`}}>
+            <span style={{color:T.success,fontWeight:700,flexShrink:0}}>✓</span>
+            <span style={{fontSize:"13px",color:T.mid}}>{f}</span>
+          </div>
+        ))}
+        <div style={{marginTop:20,textAlign:"center"}}>
+          <Btn onClick={()=>setView("home")} style={{width:"100%",padding:"12px"}}>Get started free for 7 days</Btn>
+          <p style={{margin:"10px 0 0",fontSize:"12px",color:T.muted}}>7-day money-back guarantee. No questions asked.</p>
+        </div>
+      </Card>
+      <p style={{textAlign:"center",fontSize:"12px",color:T.muted}}>
+        <a href="/privacy.html" style={{color:T.muted,marginRight:12}}>Privacy</a>
+        <a href="/terms.html" style={{color:T.muted,marginRight:12}}>Terms</a>
+        <a href="/refund.html" style={{color:T.muted}}>Refund Policy</a>
+      </p>
+    </Shell>
+  );
+
   if(view==="home") return (
     <Shell>
       {toast&&<Toast message={toast} onDone={()=>setToast(null)}/>}
@@ -1594,6 +1630,39 @@ ${summary}`,500);
       {showTour&&<Tour onDone={handleTourDone}/>}
       <BottomSearchBar onClick={()=>setShowSearch(true)}/>
       <Nav/>
+
+      {/* Onboarding checklist — shown until all 3 steps complete */}
+      {(()=>{
+        const hasProject = projects.length>0;
+        const hasNote = projects.some(p=>p.notes.length>0);
+        const hasMember = members.length>0;
+        const allDone = hasProject&&hasNote&&hasMember;
+        if(allDone) return null;
+        const steps=[
+          {done:hasProject, label:"Create your first project", action:()=>{setNewProjName("");setNewProjContext("");setNewProjDeadline("");setView("newProject");}},
+          {done:hasNote, label:"Add meeting notes to a project", action:()=>hasProject?setView("project"):null},
+          {done:hasMember, label:"Add a team member", action:()=>setView("team")},
+        ];
+        const pct = Math.round((steps.filter(s=>s.done).length/3)*100);
+        return (
+          <Card style={{marginBottom:10,borderLeft:`3px solid ${T.accent}`}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <h3 style={{margin:0,fontSize:"13px",fontWeight:700,color:T.ink}}>Getting started</h3>
+              <span style={{fontSize:"11px",color:T.muted}}>{pct}% complete</span>
+            </div>
+            <div style={{background:T.border,borderRadius:2,height:4,marginBottom:10,overflow:"hidden"}}>
+              <div style={{background:T.accent,height:"100%",width:`${pct}%`,borderRadius:2}}/>
+            </div>
+            {steps.map((s,i)=>(
+              <div key={i} onClick={!s.done?s.action:undefined} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0",borderBottom:`1px solid ${T.border}`,cursor:s.done?"default":"pointer"}}>
+                <span style={{width:18,height:18,borderRadius:"50%",background:s.done?T.success:T.border,color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"11px",fontWeight:700,flexShrink:0}}>{s.done?"✓":i+1}</span>
+                <span style={{fontSize:"13px",color:s.done?T.muted:T.ink,textDecoration:s.done?"line-through":"none"}}>{s.label}</span>
+                {!s.done&&<span style={{marginLeft:"auto",fontSize:"11px",color:T.accent}}>→</span>}
+              </div>
+            ))}
+          </Card>
+        );
+      })()}
 
       <WinToday userId={userId} todos={todos} projects={projects}/>
 
@@ -1610,7 +1679,7 @@ ${summary}`,500);
           :<p style={{color:T.mid,fontSize:"13px",margin:0}}>Click Generate to see a full summary of all your projects and tasks.</p>}
       </Card>
 
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:12}}>
         <Card>
           <h3 id="tour-tasks" style={{margin:"0 0 10px",fontSize:"13px",fontWeight:600,color:T.ink}}>This Week <span style={{fontSize:"11px",fontWeight:400,color:T.muted}}>({thisWeekTodos.length+overdueTodos.length})</span></h3>
           {(()=>{
@@ -1875,7 +1944,48 @@ ${summary}`,500);
         </div>
         {memberLoading?<p style={{color:T.muted,fontSize:"13px"}}>Generating…</p>:activeMember.summary?<MD content={activeMember.summary} small/>:<p style={{color:T.muted,fontSize:"13px",margin:0}}>Tag @{activeMember.name} in notes or click Generate.</p>}
       </Card>
-      {(()=>{ const mc=projects.flatMap(p=>(p.commitments||[]).filter(c=>c.member_id===activeMember.id).map(c=>({...c,projectName:p.name}))); if(!mc.length)return null; return(<Card><h3 style={{margin:"0 0 10px",fontSize:"13px",fontWeight:600,color:T.ink}}>Commitments ({mc.length})</h3>{mc.map(c=>(<div key={c.id} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"7px 0",borderBottom:`1px solid ${T.border}`}}><span style={{fontSize:"12px",flexShrink:0,marginTop:1,color:c.status==="open"?T.warning:T.success}}>{c.status==="open"?"●":"✓"}</span><div style={{flex:1,minWidth:0}}><p style={{margin:0,fontSize:"13px",color:T.ink,lineHeight:1.4}}>{c.commitment_text}</p><span style={{fontSize:"11px",color:T.muted}}>{c.projectName} · {fmt(c.date)}</span></div>{c.status==="open"&&<button onClick={()=>db.updateCommitmentStatus(c.id,"done").then(reload)} style={{background:"none",border:"none",fontSize:"11px",color:T.success,cursor:"pointer",padding:0,flexShrink:0}}>Mark done</button>}</div>))}</Card>); })()}
+      {(()=>{
+        const mc=projects.flatMap(p=>(p.commitments||[]).filter(c=>c.member_id===activeMember.id).map(c=>({...c,projectName:p.name})));
+        if(!mc.length) return null;
+        const total=mc.length;
+        const done=mc.filter(c=>c.status==="done").length;
+        const open=mc.filter(c=>c.status==="open").length;
+        const pct=total>0?Math.round((done/total)*100):0;
+        const reliabilityColor=pct>=80?T.success:pct>=50?"#F59E0B":T.danger;
+        const reliabilityLabel=pct>=80?"Reliable":pct>=50?"Inconsistent":"Needs attention";
+        // avg days to close
+        const closedWithDays=mc.filter(c=>c.status==="done"&&c.date).map(c=>{ const d=new Date(c.date); const now=new Date(); return Math.max(0,Math.floor((now-d)/(1000*60*60*24))); });
+        const avgDays=closedWithDays.length>0?Math.round(closedWithDays.reduce((a,b)=>a+b,0)/closedWithDays.length):null;
+        return(
+          <Card style={{marginBottom:10}}>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
+              <h3 style={{margin:0,fontSize:"13px",fontWeight:700,color:T.ink}}>Commitment Reliability</h3>
+              <span style={{fontSize:"12px",fontWeight:700,color:reliabilityColor,background:reliabilityColor+"15",padding:"2px 8px",borderRadius:3}}>{reliabilityLabel}</span>
+            </div>
+            <div style={{display:"flex",gap:20,marginBottom:12}}>
+              <div style={{textAlign:"center"}}><div style={{fontSize:"22px",fontWeight:700,color:reliabilityColor}}>{pct}%</div><div style={{fontSize:"11px",color:T.muted}}>follow-through</div></div>
+              <div style={{textAlign:"center"}}><div style={{fontSize:"22px",fontWeight:700,color:T.ink}}>{total}</div><div style={{fontSize:"11px",color:T.muted}}>total</div></div>
+              <div style={{textAlign:"center"}}><div style={{fontSize:"22px",fontWeight:700,color:T.success}}>{done}</div><div style={{fontSize:"11px",color:T.muted}}>closed</div></div>
+              <div style={{textAlign:"center"}}><div style={{fontSize:"22px",fontWeight:700,color:open>0?T.warning:T.muted}}>{open}</div><div style={{fontSize:"11px",color:T.muted}}>open</div></div>
+              {avgDays!==null&&<div style={{textAlign:"center"}}><div style={{fontSize:"22px",fontWeight:700,color:T.ink}}>{avgDays}d</div><div style={{fontSize:"11px",color:T.muted}}>avg to close</div></div>}
+            </div>
+            <div style={{background:T.border,borderRadius:2,height:5,marginBottom:12,overflow:"hidden"}}>
+              <div style={{background:reliabilityColor,height:"100%",width:`${pct}%`,borderRadius:2}}/>
+            </div>
+            <h4 style={{margin:"0 0 6px",fontSize:"12px",fontWeight:600,color:T.muted,textTransform:"uppercase",letterSpacing:"0.06em"}}>All commitments</h4>
+            {mc.map(c=>(
+              <div key={c.id} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"7px 0",borderBottom:`1px solid ${T.border}`}}>
+                <span style={{fontSize:"12px",flexShrink:0,marginTop:1,color:c.status==="open"?T.warning:T.success}}>{c.status==="open"?"●":"✓"}</span>
+                <div style={{flex:1,minWidth:0}}>
+                  <p style={{margin:0,fontSize:"13px",color:T.ink,lineHeight:1.4}}>{c.commitment_text}</p>
+                  <span style={{fontSize:"11px",color:T.muted}}>{c.projectName} · {fmt(c.date)}</span>
+                </div>
+                {c.status==="open"&&<button onClick={()=>db.updateCommitmentStatus(c.id,"done").then(reload)} style={{background:"none",border:"none",fontSize:"11px",color:T.success,cursor:"pointer",padding:0,flexShrink:0}}>Mark done</button>}
+              </div>
+            ))}
+          </Card>
+        );
+      })()}
       {(()=>{ const mentions=[]; for(const p of projects) for(const n of p.notes) if(n.taggedMembers?.includes(activeMember.id)||n.raw.toLowerCase().includes(activeMember.name.toLowerCase())) mentions.push({...n,projectName:p.name,projIdx:projects.findIndex(pp=>pp.name===p.name)}); if(!mentions.length) return <Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No notes mention this person yet.</p></Card>; return(<><GroupLabel>Meeting Notes ({mentions.length})</GroupLabel>{[...mentions].reverse().map(n=>(<Card key={n.id}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5,flexWrap:"wrap",gap:6}}><div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}><Tag color={pc(n.projIdx)}>{n.projectName}</Tag><span style={{fontSize:"11px",color:T.muted}}>{fmt(n.date)}</span></div><Btn variant="ghost" size="sm" onClick={()=>setExpandedNote(expandedNote===n.id?null:n.id)}>{expandedNote===n.id?"Hide":"View"}</Btn></div>{expandedNote===n.id?<MD content={n.summary} small/>:<p style={{fontSize:"12px",color:T.muted,margin:0,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{n.summary.replace(/[#*]/g,"").slice(0,100)}…</p>}</Card>))}</>); })()}
     </Shell>
   );
