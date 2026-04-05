@@ -1588,89 +1588,59 @@ ${summary}`,500);
   // ── HOME ──────────────────────────────────────────────────────────────────
   if(view==="score") return <ScorePage userId={userId} todos={todos} data={data} onBack={()=>setView("home")}/>;
 
-  if(view==="pricing") return (
-    <Shell maxW={640}>
+  if(view==="pricing") {
+    const gumroadIndia = "https://getdebriefs.gumroad.com/l/fpnhta";
+    const gumroadIntl  = "https://getdebriefs.gumroad.com/l/duddlw";
+    const [pricingIndia,setPricingIndia]=useState(false);
+    const [annual,setAnnual]=useState(true);
+    useEffect(()=>{ fetch("https://ipapi.co/json/").then(r=>r.json()).then(d=>{ if(d.country_code==="IN") setPricingIndia(true); }).catch(()=>{}); },[]);
+    const gumLink = pricingIndia ? gumroadIndia : gumroadIntl;
+    const price = annual ? (pricingIndia?"₹2,999":"$99") : (pricingIndia?"₹299":"$9");
+    const period = annual ? "/year" : "/month";
+    const orig = annual ? (pricingIndia?"₹7,188/year":"$228/year") : (pricingIndia?"₹599/month":"$19/month");
+    const saving = annual ? (pricingIndia?"Save 58% — ₹4,189 off":"Save 57% — $129 off") : (pricingIndia?"50% off":"53% off");
+    const FEATURES = ["Project-level meeting intelligence","AI summaries, decisions & risk extraction","Commitment tracking across meetings","Pre-meeting briefings","Team reliability scores","Win Today + Debrief Score","Unlimited projects & notes","7-day money-back guarantee"];
+    return (
+    <Shell maxW={520}>
       <div style={{textAlign:"center",padding:"32px 0 24px"}}>
         <Logo onClick={()=>setView("home")}/>
         <h1 style={{margin:"20px 0 8px",fontFamily:T.serif,fontSize:"26px",fontWeight:700,color:T.ink}}>Simple, honest pricing</h1>
         <p style={{margin:0,fontSize:"14px",color:T.muted}}>Start free. Cancel any time. 7-day money-back guarantee.</p>
       </div>
-
-      {/* Billing toggle */}
-      {(()=>{
-        const [annual,setAnnual]=useState(true);
-        return (<>
-          <div style={{display:"flex",justifyContent:"center",alignItems:"center",gap:12,marginBottom:24}}>
-            <button onClick={()=>setAnnual(false)} style={{padding:"6px 20px",fontSize:"13px",fontWeight:!annual?700:400,color:!annual?T.white:T.mid,background:!annual?T.accent:"transparent",border:`1px solid ${!annual?T.accent:T.border}`,borderRadius:2,cursor:"pointer",fontFamily:T.sans}}>Monthly</button>
-            <button onClick={()=>setAnnual(true)} style={{padding:"6px 20px",fontSize:"13px",fontWeight:annual?700:400,color:annual?T.white:T.mid,background:annual?T.accent:"transparent",border:`1px solid ${annual?T.accent:T.border}`,borderRadius:2,cursor:"pointer",fontFamily:T.sans,display:"flex",alignItems:"center",gap:6}}>
-              Annual
-              <span style={{background:"#16A34A",color:"#fff",fontSize:"10px",fontWeight:700,padding:"2px 6px",borderRadius:2}}>Save 58%</span>
-            </button>
+      <div style={{display:"flex",justifyContent:"center",gap:10,marginBottom:24}}>
+        <button onClick={()=>setAnnual(false)} style={{padding:"6px 20px",fontSize:"13px",fontWeight:!annual?700:400,color:!annual?T.white:T.mid,background:!annual?T.accent:"transparent",border:`1px solid ${!annual?T.accent:T.border}`,borderRadius:2,cursor:"pointer",fontFamily:T.sans}}>Monthly</button>
+        <button onClick={()=>setAnnual(true)} style={{padding:"6px 20px",fontSize:"13px",fontWeight:annual?700:400,color:annual?T.white:T.mid,background:annual?T.accent:"transparent",border:`1px solid ${annual?T.accent:T.border}`,borderRadius:2,cursor:"pointer",fontFamily:T.sans,display:"flex",alignItems:"center",gap:6}}>
+          Annual <span style={{background:"#16A34A",color:"#fff",fontSize:"10px",fontWeight:700,padding:"2px 6px",borderRadius:2}}>Most popular</span>
+        </button>
+      </div>
+      <Card style={{borderTop:`3px solid ${T.accent}`,maxWidth:400,margin:"0 auto 16px"}}>
+        <div style={{display:"flex",alignItems:"baseline",gap:6,marginBottom:4}}>
+          <span style={{fontFamily:T.serif,fontSize:"42px",fontWeight:700,color:T.ink}}>{price}</span>
+          <span style={{fontSize:"13px",color:T.muted}}>{period}</span>
+        </div>
+        <div style={{fontSize:"12px",marginBottom:6}}>
+          <span style={{textDecoration:"line-through",color:T.muted}}>{orig}</span>
+          <span style={{color:"#16A34A",fontWeight:600,marginLeft:8}}>{saving}</span>
+        </div>
+        {FEATURES.map(f=>(
+          <div key={f} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 0",borderBottom:`1px solid ${T.border}`}}>
+            <span style={{color:"#16A34A",fontWeight:700,flexShrink:0}}>✓</span>
+            <span style={{fontSize:"13px",color:T.mid}}>{f}</span>
           </div>
-
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:16,marginBottom:24}}>
-            {/* India plan */}
-            <Card style={{borderTop:`3px solid ${T.accent}`,position:"relative"}}>
-              {annual&&<div style={{position:"absolute",top:-1,right:16,background:T.accent,color:"#fff",fontSize:"10px",fontWeight:700,padding:"3px 10px",borderRadius:"0 0 4px 4px"}}>MOST POPULAR</div>}
-              <div style={{marginBottom:4}}><span style={{fontSize:"11px",fontWeight:700,color:T.muted,textTransform:"uppercase",letterSpacing:"0.06em"}}>India</span></div>
-              <div style={{display:"flex",alignItems:"baseline",gap:6,marginBottom:4}}>
-                <span style={{fontFamily:T.serif,fontSize:"38px",fontWeight:700,color:T.ink}}>{annual?"₹2,999":"₹299"}</span>
-                <span style={{fontSize:"13px",color:T.muted}}>{annual?"/year":"/month"}</span>
-              </div>
-              <div style={{fontSize:"12px",color:T.muted,marginBottom:16}}>
-                <span style={{textDecoration:"line-through",color:T.muted}}>{annual?"₹7,188/year":"₹599/month"}</span>
-                <span style={{color:"#16A34A",fontWeight:600,marginLeft:6}}>{annual?"Save ₹4,189 (58%)":"50% off"}</span>
-              </div>
-              {["Project-level meeting intelligence","AI summaries, decisions & risk extraction","Commitment tracking across meetings","Pre-meeting briefings","Team reliability scores","Win Today + Debrief Score","Unlimited projects & notes","7-day money-back guarantee"].map(f=>(
-                <div key={f} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 0",borderBottom:`1px solid ${T.border}`}}>
-                  <span style={{color:"#16A34A",fontWeight:700,flexShrink:0}}>✓</span>
-                  <span style={{fontSize:"12px",color:T.mid}}>{f}</span>
-                </div>
-              ))}
-              <div style={{marginTop:16}}><Btn onClick={()=>window.open("https://getdebriefs.gumroad.com/l/duddlw","_blank")} style={{width:"100%",padding:"10px"}}>Get started — India</Btn></div>
-              <p style={{margin:"8px 0 0",fontSize:"11px",color:T.muted,textAlign:"center"}}>UPI · Cards · Net banking</p>
-            </Card>
-
-            {/* International plan */}
-            <Card style={{borderTop:`3px solid ${T.accentMid}`,position:"relative"}}>
-              {annual&&<div style={{position:"absolute",top:-1,right:16,background:T.accentMid,color:"#fff",fontSize:"10px",fontWeight:700,padding:"3px 10px",borderRadius:"0 0 4px 4px"}}>MOST POPULAR</div>}
-              <div style={{marginBottom:4}}><span style={{fontSize:"11px",fontWeight:700,color:T.muted,textTransform:"uppercase",letterSpacing:"0.06em"}}>International</span></div>
-              <div style={{display:"flex",alignItems:"baseline",gap:6,marginBottom:4}}>
-                <span style={{fontFamily:T.serif,fontSize:"38px",fontWeight:700,color:T.ink}}>{annual?"$99":"$9"}</span>
-                <span style={{fontSize:"13px",color:T.muted}}>{annual?"/year":"/month"}</span>
-              </div>
-              <div style={{fontSize:"12px",color:T.muted,marginBottom:16}}>
-                <span style={{textDecoration:"line-through",color:T.muted}}>{annual?"$228/year":"$19/month"}</span>
-                <span style={{color:"#16A34A",fontWeight:600,marginLeft:6}}>{annual?"Save $129 (57%)":"53% off"}</span>
-              </div>
-              {["Project-level meeting intelligence","AI summaries, decisions & risk extraction","Commitment tracking across meetings","Pre-meeting briefings","Team reliability scores","Win Today + Debrief Score","Unlimited projects & notes","7-day money-back guarantee"].map(f=>(
-                <div key={f} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 0",borderBottom:`1px solid ${T.border}`}}>
-                  <span style={{color:"#16A34A",fontWeight:700,flexShrink:0}}>✓</span>
-                  <span style={{fontSize:"12px",color:T.mid}}>{f}</span>
-                </div>
-              ))}
-              <div style={{marginTop:16}}><Btn onClick={()=>window.open("https://getdebriefs.gumroad.com/l/duddlw","_blank")} style={{width:"100%",padding:"10px",background:T.accentMid}}>Get started — International</Btn></div>
-              <p style={{margin:"8px 0 0",fontSize:"11px",color:T.muted,textAlign:"center"}}>Credit card · PayPal</p>
-            </Card>
-          </div>
-
-          <Card style={{background:"#FAFAF8",textAlign:"center"}}>
-            <p style={{margin:0,fontSize:"13px",color:T.mid,lineHeight:1.6}}>
-              Not sure? <strong>Start free</strong> — no credit card needed to try.<br/>
-              Payments via <strong>Gumroad</strong> — cards, PayPal, international payments supported.<br/>
-              Questions? <a href="mailto:hello@getdebriefs.com" style={{color:T.accent}}>hello@getdebriefs.com</a>
-            </p>
-          </Card>
-
-          <p style={{textAlign:"center",fontSize:"12px",color:T.muted,marginTop:16}}>
-            <a href="/privacy.html" style={{color:T.muted,marginRight:12}}>Privacy</a>
-            <a href="/terms.html" style={{color:T.muted,marginRight:12}}>Terms</a>
-            <a href="/refund.html" style={{color:T.muted}}>Refund Policy</a>
-          </p>
-        </>);
-      })()}
+        ))}
+        <div style={{marginTop:20}}>
+          <Btn onClick={()=>window.open(gumLink,"_blank")} style={{width:"100%",padding:"12px"}}>Get started →</Btn>
+          <p style={{margin:"10px 0 0",fontSize:"12px",color:T.muted,textAlign:"center"}}>via Gumroad · Cards · PayPal · 7-day money-back</p>
+        </div>
+      </Card>
+      <p style={{textAlign:"center",fontSize:"12px",color:T.muted}}>
+        <a href="/privacy.html" style={{color:T.muted,marginRight:12}}>Privacy</a>
+        <a href="/terms.html" style={{color:T.muted,marginRight:12}}>Terms</a>
+        <a href="/refund.html" style={{color:T.muted}}>Refund Policy</a>
+      </p>
     </Shell>
-  );
+    );
+  }
 
   if(view==="home") return (
     <Shell>
