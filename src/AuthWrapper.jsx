@@ -163,6 +163,7 @@ export default function AuthWrapper({ children }) {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeScreen, setActiveScreen] = useState(0);
+  const [isIndia, setIsIndia] = useState(false); // geo-detected
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -172,6 +173,11 @@ export default function AuthWrapper({ children }) {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
     });
+    // Geo-detect silently — default to international, switch to India if detected
+    fetch("https://ipapi.co/json/")
+      .then(r=>r.json())
+      .then(d=>{ if(d.country_code==="IN") setIsIndia(true); })
+      .catch(()=>{}); // silent fail — stays international
     return () => subscription.unsubscribe();
   }, []);
 
@@ -195,20 +201,20 @@ export default function AuthWrapper({ children }) {
     <div style={{minHeight:"100vh",background:bg,fontFamily:sans,color:ink,overflowX:"hidden"}}>
 
       {/* Nav */}
-      <nav style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"16px 24px",borderBottom:`1px solid ${border}`,background:white,position:"sticky",top:0,zIndex:100}}>
+      <nav style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"14px 20px",borderBottom:`1px solid ${border}`,background:white,position:"sticky",top:0,zIndex:100}}>
         <div style={{display:"flex",alignItems:"center",gap:8}}>
           <div style={{width:3,height:20,background:accent}}/>
           <span style={{fontFamily:serif,fontSize:"18px",fontWeight:700,color:ink,letterSpacing:"-0.02em"}}>Debrief</span>
         </div>
-        <div style={{display:"flex",alignItems:"center",gap:12}}>
-          <a href="#features" style={{fontSize:"13px",color:muted,textDecoration:"none"}}>Features</a>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <a href="#features" style={{fontSize:"13px",color:muted,textDecoration:"none",display:"none"}} className="nav-link">Features</a>
           <a href="#pricing" style={{fontSize:"13px",color:muted,textDecoration:"none"}}>Pricing</a>
-          <button onClick={signIn} style={{padding:"7px 18px",background:accent,color:white,border:"none",borderRadius:3,fontSize:"13px",fontWeight:600,cursor:"pointer",fontFamily:sans}}>Sign in</button>
+          <button onClick={signIn} style={{padding:"7px 16px",background:accent,color:white,border:"none",borderRadius:3,fontSize:"13px",fontWeight:600,cursor:"pointer",fontFamily:sans,whiteSpace:"nowrap"}}>Sign in</button>
         </div>
       </nav>
 
       {/* Hero */}
-      <section style={{maxWidth:1100,margin:"0 auto",padding:"64px 24px 48px",display:"grid",gridTemplateColumns:"1fr 1fr",gap:48,alignItems:"center"}}>
+      <section style={{maxWidth:1100,margin:"0 auto",padding:"64px 24px 48px",display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:48,alignItems:"center"}}>
         <div>
           <div style={{display:"inline-flex",alignItems:"center",gap:6,background:accentLight,border:`1px solid ${accent}30`,borderRadius:20,padding:"4px 12px",marginBottom:20}}>
             <span style={{width:6,height:6,borderRadius:"50%",background:"#16A34A",display:"inline-block"}}/>
@@ -260,11 +266,20 @@ export default function AuthWrapper({ children }) {
         </div>
       </section>
 
-      {/* Social proof */}
-      <section style={{background:white,borderTop:`1px solid ${border}`,borderBottom:`1px solid ${border}`,padding:"20px 24px",textAlign:"center"}}>
-        <p style={{margin:0,fontSize:"13px",color:muted}}>
-          Built for <strong style={{color:ink}}>supply chain leaders</strong> · <strong style={{color:ink}}>consultants</strong> · <strong style={{color:ink}}>operations heads</strong> · <strong style={{color:ink}}>founders</strong> who run too many meetings to remember everything
-        </p>
+      {/* Social proof — sharp personas */}
+      <section style={{background:white,borderTop:`1px solid ${border}`,borderBottom:`1px solid ${border}`,padding:"20px 24px"}}>
+        <p style={{margin:"0 0 12px",fontSize:"12px",fontWeight:700,color:muted,textAlign:"center",letterSpacing:"0.06em",textTransform:"uppercase"}}>Built for people who</p>
+        <div style={{display:"flex",flexWrap:"wrap",justifyContent:"center",gap:8,maxWidth:800,margin:"0 auto"}}>
+          {[
+            "Leave meetings unsure what just got decided",
+            "Said 'I'll follow up' 10 times this week",
+            "Manage 5+ stakeholders across 3+ projects",
+            "Prep for meetings by scrolling old chats",
+            "Run teams where nothing falls through — or shouldn't",
+          ].map(p=>(
+            <span key={p} style={{fontSize:"13px",color:ink,background:"#F7F6F3",border:`1px solid ${border}`,borderRadius:20,padding:"6px 14px"}}>{p}</span>
+          ))}
+        </div>
       </section>
 
       {/* Features */}
@@ -329,41 +344,72 @@ export default function AuthWrapper({ children }) {
         </div>
       </section>
 
-      {/* Pricing */}
+      {/* Pricing — geo-aware, no labels */}
       <section id="pricing" style={{maxWidth:800,margin:"0 auto",padding:"64px 24px"}}>
         <div style={{textAlign:"center",marginBottom:40}}>
-          <h2 style={{fontFamily:serif,fontSize:"32px",fontWeight:700,color:ink,margin:"0 0 12px",letterSpacing:"-0.02em"}}>Simple pricing</h2>
+          <h2 style={{fontFamily:serif,fontSize:"clamp(24px,4vw,32px)",fontWeight:700,color:ink,margin:"0 0 12px",letterSpacing:"-0.02em"}}>Simple pricing</h2>
           <p style={{fontSize:"15px",color:muted,margin:0}}>Start free. Cancel any time. 7-day money-back guarantee.</p>
         </div>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:20}}>
-          {[
-            {region:"🇮🇳 India",price:"₹299",period:"/month",original:"₹599/month",annual:"₹2,999/year",annualOrig:"₹7,188/year",save:"58%",cta:"Get started",color:accent},
-            {region:"🌍 International",price:"$9",period:"/month",original:"$19/month",annual:"$99/year",annualOrig:"$228/year",save:"57%",cta:"Get started",color:"#1D4ED8"},
-          ].map(p=>(
-            <div key={p.region} style={{background:white,border:`1px solid ${border}`,borderRadius:8,padding:"28px",borderTop:`3px solid ${p.color}`}}>
-              <div style={{fontSize:"15px",fontWeight:700,color:ink,marginBottom:16}}>{p.region}</div>
-              <div style={{display:"flex",alignItems:"baseline",gap:4,marginBottom:4}}>
-                <span style={{fontFamily:serif,fontSize:"36px",fontWeight:700,color:ink}}>{p.price}</span>
-                <span style={{fontSize:"13px",color:muted}}>{p.period}</span>
-              </div>
-              <div style={{fontSize:"12px",marginBottom:4}}><span style={{textDecoration:"line-through",color:muted}}>{p.original}</span></div>
-              <div style={{background:"#F0FDF4",border:"1px solid #16A34A",borderRadius:3,padding:"4px 10px",display:"inline-flex",alignItems:"center",gap:4,marginBottom:16}}>
-                <span style={{fontSize:"11px",fontWeight:700,color:"#15803D"}}>Annual: {p.annual}</span>
-                <span style={{fontSize:"10px",color:"#15803D"}}>· Save {p.save}</span>
-              </div>
-              <div style={{fontSize:"11px",color:muted,marginBottom:16,textDecoration:"line-through"}}>{p.annualOrig}</div>
-              <button onClick={signIn} style={{width:"100%",padding:"11px",background:p.color,color:white,border:"none",borderRadius:3,fontSize:"14px",fontWeight:600,cursor:"pointer",fontFamily:sans}}>
-                Start free →
-              </button>
-              <p style={{margin:"8px 0 0",fontSize:"11px",color:muted,textAlign:"center"}}>via Gumroad · Cards · PayPal</p>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:20}}>
+          <div style={{background:white,border:`1px solid ${border}`,borderRadius:8,padding:"28px",borderTop:`3px solid ${accent}`}}>
+            <div style={{fontSize:"13px",fontWeight:600,color:muted,marginBottom:12}}>Monthly</div>
+            <div style={{display:"flex",alignItems:"baseline",gap:4,marginBottom:4}}>
+              <span style={{fontFamily:serif,fontSize:"36px",fontWeight:700,color:ink}}>{isIndia?"₹299":"$9"}</span>
+              <span style={{fontSize:"13px",color:muted}}>/month</span>
             </div>
-          ))}
+            <div style={{fontSize:"12px",marginBottom:20}}>
+              <span style={{textDecoration:"line-through",color:muted}}>{isIndia?"₹599/month":"$19/month"}</span>
+              <span style={{color:"#16A34A",fontWeight:600,marginLeft:6}}>{isIndia?"50% off":"53% off"}</span>
+            </div>
+            <button onClick={()=>window.open("https://getdebriefs.gumroad.com/l/duddlw","_blank")} style={{width:"100%",padding:"11px",background:white,color:accent,border:`2px solid ${accent}`,borderRadius:3,fontSize:"14px",fontWeight:600,cursor:"pointer",fontFamily:sans}}>Get started →</button>
+          </div>
+          <div style={{background:white,border:`2px solid ${accent}`,borderRadius:8,padding:"28px",borderTop:`3px solid ${accent}`,position:"relative"}}>
+            <div style={{position:"absolute",top:-12,left:"50%",transform:"translateX(-50%)",background:accent,color:white,fontSize:"10px",fontWeight:700,padding:"3px 14px",borderRadius:20,whiteSpace:"nowrap"}}>⭐ MOST POPULAR</div>
+            <div style={{fontSize:"13px",fontWeight:600,color:muted,marginBottom:12}}>Annual</div>
+            <div style={{display:"flex",alignItems:"baseline",gap:4,marginBottom:4}}>
+              <span style={{fontFamily:serif,fontSize:"36px",fontWeight:700,color:ink}}>{isIndia?"₹2,999":"$99"}</span>
+              <span style={{fontSize:"13px",color:muted}}>/year</span>
+            </div>
+            <div style={{fontSize:"12px",marginBottom:8}}><span style={{textDecoration:"line-through",color:muted}}>{isIndia?"₹7,188/year":"$228/year"}</span></div>
+            <div style={{background:"#F0FDF4",border:"1px solid #16A34A",borderRadius:3,padding:"5px 10px",marginBottom:20,textAlign:"center"}}>
+              <span style={{fontSize:"12px",fontWeight:700,color:"#15803D"}}>Save {isIndia?"58% — ₹4,189 off":"57% — $129 off"}</span>
+            </div>
+            <button onClick={()=>window.open("https://getdebriefs.gumroad.com/l/duddlw","_blank")} style={{width:"100%",padding:"11px",background:accent,color:white,border:"none",borderRadius:3,fontSize:"14px",fontWeight:600,cursor:"pointer",fontFamily:sans}}>Get started →</button>
+          </div>
+        </div>
+        <p style={{textAlign:"center",fontSize:"12px",color:muted,marginTop:20}}>All features included · No credit card to start · Questions? <a href="mailto:hello@getdebriefs.com" style={{color:accent}}>hello@getdebriefs.com</a></p>
+      </section>
+
+      {/* Blogs / Resources */}
+      <section style={{background:white,borderTop:`1px solid ${border}`,borderBottom:`1px solid ${border}`,padding:"64px 24px"}}>
+        <div style={{maxWidth:1000,margin:"0 auto"}}>
+          <div style={{textAlign:"center",marginBottom:40}}>
+            <h2 style={{fontFamily:serif,fontSize:"clamp(22px,4vw,28px)",fontWeight:700,color:ink,margin:"0 0 8px",letterSpacing:"-0.02em"}}>From the Debrief blog</h2>
+            <p style={{fontSize:"14px",color:muted,margin:0}}>Practical thinking on meetings, accountability, and getting things done.</p>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:20}}>
+            {[
+              {tag:"MEETINGS",title:"Why 80% of meeting decisions are never acted on — and what to do about it",desc:"Most meetings end with good intentions and no system. Here's the anatomy of a decision that actually sticks.",mins:"4 min read"},
+              {tag:"ACCOUNTABILITY",title:"The hidden cost of commitment drift in your team",desc:"When people say 'I'll follow up' and don't, the damage isn't just the missed task. It's the trust that quietly erodes.",mins:"5 min read"},
+              {tag:"PRODUCTIVITY",title:"How to run fewer meetings without losing alignment",desc:"The paradox: the teams with the best meeting hygiene have the fewest meetings. Here's what they do differently.",mins:"6 min read"},
+            ].map(post=>(
+              <div key={post.title} style={{border:`1px solid ${border}`,borderRadius:6,padding:"24px",background:"#FAFAF8",cursor:"pointer"}} onClick={()=>window.open("https://getdebriefs.com","_blank")}>
+                <div style={{fontSize:"10px",fontWeight:700,color:accent,letterSpacing:"0.08em",marginBottom:10}}>{post.tag}</div>
+                <h3 style={{fontFamily:serif,fontSize:"16px",fontWeight:700,color:ink,margin:"0 0 10px",lineHeight:1.4}}>{post.title}</h3>
+                <p style={{fontSize:"13px",color:"#555",lineHeight:1.6,margin:"0 0 16px"}}>{post.desc}</p>
+                <span style={{fontSize:"11px",color:muted}}>{post.mins}</span>
+              </div>
+            ))}
+          </div>
+          <div style={{textAlign:"center",marginTop:32}}>
+            <a href="https://getdebriefs.com" style={{fontSize:"13px",color:accent,fontWeight:600,textDecoration:"none",border:`1px solid ${accent}`,padding:"8px 20px",borderRadius:3}}>View all articles →</a>
+          </div>
         </div>
       </section>
 
       {/* Final CTA */}
       <section style={{background:accent,padding:"64px 24px",textAlign:"center"}}>
-        <h2 style={{fontFamily:serif,fontSize:"32px",fontWeight:700,color:white,margin:"0 0 16px",letterSpacing:"-0.02em"}}>Stop losing decisions in meetings.</h2>
+        <h2 style={{fontFamily:serif,fontSize:"clamp(22px,4vw,32px)",fontWeight:700,color:white,margin:"0 0 16px",letterSpacing:"-0.02em"}}>Stop losing decisions in meetings.</h2>
         <p style={{fontSize:"16px",color:"rgba(255,255,255,0.8)",margin:"0 0 32px",lineHeight:1.6}}>Join professionals who use Debrief to track what was decided,<br/>who committed to what, and what to do next.</p>
         <button onClick={signIn} style={{display:"inline-flex",alignItems:"center",gap:10,padding:"14px 28px",background:white,color:accent,border:"none",borderRadius:3,fontSize:"15px",fontWeight:700,cursor:"pointer",fontFamily:sans,boxShadow:"0 4px 16px rgba(0,0,0,0.2)"}}>
           <svg width="18" height="18" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
