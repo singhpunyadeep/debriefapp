@@ -361,7 +361,7 @@ export default function AuthWrapper({ children }) {
               <span style={{textDecoration:"line-through",color:muted}}>{isIndia?"₹599/month":"$19/month"}</span>
               <span style={{color:"#16A34A",fontWeight:600,marginLeft:6}}>{isIndia?"50% off":"53% off"}</span>
             </div>
-            <button onClick={()=>window.open("https://getdebriefs.gumroad.com/l/duddlw","_blank")} style={{width:"100%",padding:"11px",background:white,color:accent,border:`2px solid ${accent}`,borderRadius:3,fontSize:"14px",fontWeight:600,cursor:"pointer",fontFamily:sans}}>Get started →</button>
+            <button onClick={()=>window.open(isIndia?"https://getdebriefs.gumroad.com/l/fpnhta":"https://getdebriefs.gumroad.com/l/duddlw","_blank")} style={{width:"100%",padding:"11px",background:white,color:accent,border:`2px solid ${accent}`,borderRadius:3,fontSize:"14px",fontWeight:600,cursor:"pointer",fontFamily:sans}}>Get started →</button>
           </div>
           <div style={{background:white,border:`2px solid ${accent}`,borderRadius:8,padding:"28px",borderTop:`3px solid ${accent}`,position:"relative"}}>
             <div style={{position:"absolute",top:-12,left:"50%",transform:"translateX(-50%)",background:accent,color:white,fontSize:"10px",fontWeight:700,padding:"3px 14px",borderRadius:20,whiteSpace:"nowrap"}}>⭐ MOST POPULAR</div>
@@ -374,7 +374,7 @@ export default function AuthWrapper({ children }) {
             <div style={{background:"#F0FDF4",border:"1px solid #16A34A",borderRadius:3,padding:"5px 10px",marginBottom:20,textAlign:"center"}}>
               <span style={{fontSize:"12px",fontWeight:700,color:"#15803D"}}>Save {isIndia?"58% — ₹4,189 off":"57% — $129 off"}</span>
             </div>
-            <button onClick={()=>window.open("https://getdebriefs.gumroad.com/l/duddlw","_blank")} style={{width:"100%",padding:"11px",background:accent,color:white,border:"none",borderRadius:3,fontSize:"14px",fontWeight:600,cursor:"pointer",fontFamily:sans}}>Get started →</button>
+            <button onClick={()=>window.open(isIndia?"https://getdebriefs.gumroad.com/l/fpnhta":"https://getdebriefs.gumroad.com/l/duddlw","_blank")} style={{width:"100%",padding:"11px",background:accent,color:white,border:"none",borderRadius:3,fontSize:"14px",fontWeight:600,cursor:"pointer",fontFamily:sans}}>Get started →</button>
           </div>
         </div>
         <p style={{textAlign:"center",fontSize:"12px",color:muted,marginTop:20}}>All features included · No credit card to start · Questions? <a href="mailto:hello@getdebriefs.com" style={{color:accent}}>hello@getdebriefs.com</a></p>
