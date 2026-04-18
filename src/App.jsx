@@ -81,6 +81,7 @@ const db = {
         ...p, statusUpdated:p.status_updated_at,
         rag: p.rag||null, ragOverride: p.rag_override||false,
         deadline: p.deadline||null,
+        quietThreshold: p.quiet_threshold||7,
         // FIX #7: include project context
         context: p.context||"",
         notes:(notes||[]).filter(n=>n.project_id===p.id).map(n=>({
@@ -112,6 +113,29 @@ const db = {
   // FIX #7: update context
   async updateProjectContext(projectId, context) {
     await supabase.from('projects').update({context}).eq('id',projectId);
+  },
+  async updateProjectQuietThreshold(projectId, days) {
+    await supabase.from('projects').update({quiet_threshold:days}).eq('id',projectId);
+  },
+  // Goals
+  async loadGoals(userId) {
+    const {data:goals} = await supabase.from('goals').select('*').eq('user_id',userId).order('created_at',{ascending:false});
+    const {data:links} = await supabase.from('project_goals').select('*');
+    return {goals:goals||[], links:links||[]};
+  },
+  async createGoal(userId,{title,description,targetDate,owner}) {
+    const {data} = await supabase.from('goals').insert({user_id:userId,title,description,target_date:targetDate||null,owner}).select().single();
+    return data;
+  },
+  async updateGoal(goalId,{title,description,targetDate,owner}) {
+    await supabase.from('goals').update({title,description,target_date:targetDate||null,owner}).eq('id',goalId);
+  },
+  async deleteGoal(goalId) { await supabase.from('goals').delete().eq('id',goalId); },
+  async linkProjectToGoal(goalId,projectId) {
+    await supabase.from('project_goals').upsert({goal_id:goalId,project_id:projectId},{onConflict:'goal_id,project_id'});
+  },
+  async unlinkProjectFromGoal(goalId,projectId) {
+    await supabase.from('project_goals').delete().eq('goal_id',goalId).eq('project_id',projectId);
   },
   async updateProjectDeadline(projectId, deadline) {
     await supabase.from('projects').update({deadline:deadline||null}).eq('id',projectId);
@@ -564,13 +588,16 @@ const SearchAskOverlay = ({projects,members,todos,onClose,onProjectNav}) => {
   const handleAsk=async()=>{
     if(!q.trim()) return; setAsking(true);setAskAnswer("");setMode("ask");
     try{
+      const projectSummaries=projects.map(p=>`Project: ${p.name} | RAG:${p.rag||"unknown"} | deadline:${p.deadline||"none"} | notes:${p.notes.length} | last note:${p.notes.length>0?fmt([...p.notes].sort((a,b)=>new Date(b.date)-new Date(a.date))[0].date):"never"}`);
       const ctx=[
-        ...projects.flatMap(p=>p.notes.map(n=>`[${p.name}] ${fmt(n.date)}:\n${n.summary}`)),
-        ...projects.flatMap(p=>(p.decisions||[]).map(d=>`[${p.name}] Decision: ${d.decision_text}`)),
-        ...projects.flatMap(p=>(p.commitments||[]).map(c=>`[${p.name}] Commitment by ${members.find(m=>m.id===c.member_id)?.name||"someone"}: ${c.commitment_text} (${c.status})`)),
-        ...todos.map(t=>{const p=projects.find(pp=>pp.id===t.projectId);return `[${p?.name||"No project"}] Task: ${t.text} (${t.done?"done":"pending"})`;})
+        "PROJECTS:\n"+projectSummaries.join("\n"),
+        "DECISIONS:\n"+projects.flatMap(p=>(p.decisions||[]).map(d=>`[${p.name}] ${d.decision_text} (${fmt(d.date)})`)).join("\n"),
+        "COMMITMENTS:\n"+projects.flatMap(p=>(p.commitments||[]).map(c=>`[${p.name}] ${members.find(m=>m.id===c.member_id)?.name||"Someone"}: ${c.commitment_text} (${c.status}, ${fmt(c.date)})`)).join("\n"),
+        "RISKS:\n"+projects.flatMap(p=>(p.risks||[]).filter(r=>!r.dismissed).map(r=>`[${p.name}] ${r.severity}: ${r.risk_text}`)).join("\n"),
+        "TASKS:\n"+todos.map(t=>{const p=projects.find(pp=>pp.id===t.projectId);return `${t.text} | ${p?.name||"no project"} | ${t.done?"done":"open"} | due:${t.dueDate||"none"}`;}).join("\n"),
+        "MEETING NOTES:\n"+projects.flatMap(p=>p.notes.map(n=>`[${p.name}] ${fmt(n.date)}:\n${n.summary}`)).join("\n\n"),
       ].join("\n\n");
-      const answer=await claude(`You are a helpful assistant with access to all the user's meeting notes, decisions, commitments and tasks. Answer the question directly and specifically. If you can't find the answer, say so.\n\nQuestion: ${q}\n\nContext:\n${ctx}`,800);
+      const answer=await claude(`You are Debrief AI — a smart project intelligence assistant. You have full access to the user's projects, decisions, commitments, risks, tasks and meeting notes below. Answer questions directly and specifically. For scenario questions ("what happens if..."), reason through dependencies and give a specific impact assessment. For status queries ("who hasn't...", "which projects are..."), scan the data precisely. Never say you don't have access — you do.\n\nQuestion: ${q}\n\nData:\n${ctx}`,1000);
       setAskAnswer(answer);
     }catch{setAskAnswer("Sorry, couldn't get an answer. Please try again.");}
     finally{setAsking(false);}
@@ -580,7 +607,7 @@ const SearchAskOverlay = ({projects,members,todos,onClose,onProjectNav}) => {
       <div style={{background:T.white,margin:"20px 16px 0",borderRadius:4,padding:"12px 16px",display:"flex",gap:10,alignItems:"center"}} onClick={e=>e.stopPropagation()}>
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="6" cy="6" r="4.5" stroke={T.muted} strokeWidth="1.5"/><path d="M9.5 9.5L12 12" stroke={T.muted} strokeWidth="1.5" strokeLinecap="round"/></svg>
         <input ref={inputRef} value={q} onChange={e=>{setQ(e.target.value);setMode("search");setAskAnswer("");}} onKeyDown={e=>e.key==="Enter"&&isQuestion&&handleAsk()}
-          placeholder="Search or ask: 'Who owns the API task?' or 'What did we decide about pricing?'"
+          placeholder="Ask anything: 'Who hasn't closed a commitment in 14 days?' or 'What happens if Rahul is delayed?'"
           style={{flex:1,border:"none",outline:"none",fontSize:"14px",color:T.ink,fontFamily:T.sans,background:"transparent"}}/>
         {isQuestion&&q.trim()&&<button onClick={handleAsk} disabled={asking} style={{padding:"4px 12px",fontSize:"12px",background:T.accent,color:"#fff",border:"none",borderRadius:2,cursor:"pointer",flexShrink:0,fontFamily:T.sans}}>{asking?"Asking…":"Ask AI"}</button>}
         <button onClick={onClose} style={{background:"none",border:"none",color:T.muted,fontSize:18,cursor:"pointer",padding:0}}>✕</button>
@@ -596,7 +623,7 @@ const SearchAskOverlay = ({projects,members,todos,onClose,onProjectNav}) => {
         {mode==="search"&&q.trim()&&results.length===0&&<div style={{background:T.white,borderRadius:4,padding:"24px",textAlign:"center",color:T.muted,fontSize:"14px"}}>No results. Try asking a question — type "?" at the end.</div>}
         {!q.trim()&&<div style={{background:T.white,borderRadius:4,padding:"20px 16px"}}>
           <p style={{margin:"0 0 12px",fontSize:"11px",fontWeight:700,letterSpacing:"0.06em",color:T.muted,textTransform:"uppercase"}}>Try asking</p>
-          {["Who owns the API integration task?","What did we decide about pricing?","Which projects have overdue items?","What has Sarah committed to?","Show me all risks across projects"].map((s,i)=>(
+          {["Who hasn't closed a commitment in 14 days?","Which projects have gone quiet this week?","What happens if Rahul doesn't deliver this week?","Show me all decisions we made about vendors","Which project is most at risk of slipping?"].map((s,i)=>(
             <button key={i} onClick={()=>{setQ(s);setTimeout(()=>handleAsk(),100);}} style={{display:"block",width:"100%",textAlign:"left",padding:"8px 0",fontSize:"13px",color:T.accentMid,background:"none",border:"none",borderBottom:`1px solid ${T.border}`,cursor:"pointer",fontFamily:T.sans}}>{s}</button>
           ))}
         </div>}
@@ -1183,12 +1210,20 @@ export default function App() {
   // FIX #5: show all toggles
   const [showAllRisks,setShowAllRisks]=useState(false);
   const [showAllProjects,setShowAllProjects]=useState(false);
+  const [goals,setGoals]=useState([]);
+  const [goalLinks,setGoalLinks]=useState([]);
+  const [contextSuggestion,setContextSuggestion]=useState(null); // {projectId, suggestion}
+  const [crossRisks,setCrossRisks]=useState([]); // [{theme, projects, riskTexts}]
+  const [newGoalTitle,setNewGoalTitle]=useState("");
+  const [newGoalDesc,setNewGoalDesc]=useState("");
+  const [newGoalDate,setNewGoalDate]=useState("");
+  const [editingGoalId,setEditingGoalId]=useState(null);
 
   const taggedMembersRef=useRef([]);
   const taggedSelfRef=useRef(false);
 
   useEffect(()=>{
-    db.getUser().then(user=>{ if(user){ setUserId(user.id); db.loadAll(user.id).then(d=>{ setData(d); if(d.me)setMeName(d.me); if(d.me&&!d.tourDone)setShowTour(true); }); } });
+    db.getUser().then(user=>{ if(user){ setUserId(user.id); db.loadAll(user.id).then(d=>{ setData(d); if(d.me)setMeName(d.me); if(d.me&&!d.tourDone)setShowTour(true); }); db.loadGoals(user.id).then(({goals,links})=>{setGoals(goals);setGoalLinks(links);}); } });
   },[]);
   useEffect(()=>{
     const h=e=>{ if(e.key==="k"&&(e.metaKey||e.ctrlKey)){e.preventDefault();setShowSearch(s=>!s);} };
@@ -1472,6 +1507,32 @@ ${summary}`,500);
         } catch(e){ console.error("Background processing error:",e); }
       };
       bgRun(); // fire and forget — does NOT block navigation
+
+      // Cross-project risk correlation (runs after note save)
+      const runCrossRisk = async () => {
+        try {
+          const d = await db.loadAll(userId);
+          const allRisks = d.projects.flatMap(p=>(p.risks||[]).filter(r=>!r.dismissed).map(r=>({...r,projName:p.name,projId:p.id})));
+          if(allRisks.length<2) return;
+          const riskList = allRisks.map(r=>`[${r.projName}] ${r.risk_text}`).join("\n");
+          const raw = await claude(`Identify risks that appear across multiple projects. Return ONLY valid JSON array of correlations (max 3), no other text:\n[{"theme":"short theme name","projects":["proj1","proj2"],"summary":"one sentence insight"}]\nIf no correlations, return [].\n\nRisks:\n${riskList}`,200);
+          const corrs = parseJsonSafe(raw);
+          if(Array.isArray(corrs)&&corrs.length>0) setCrossRisks(corrs);
+        } catch {}
+      };
+      runCrossRisk();
+
+      // Context auto-update suggestion
+      const suggestContextUpdate = async () => {
+        try {
+          if(!projSnap.notes||projSnap.notes.length===0) return;
+          const currentCtx = projSnap.context||"";
+          const raw = await claude(`Based on this new meeting note, suggest a one-sentence update to the project context if something significant changed (timeline, scope, budget, team, decisions). If nothing changed, return empty string.\n\nCurrent context: ${currentCtx}\n\nNew meeting summary: ${summary}`,100);
+          const suggestion = raw.trim().replace(/^["']|["']$/g,"");
+          if(suggestion&&suggestion.length>10&&suggestion!=="") setContextSuggestion({projectId:projSnap.id,suggestion});
+        } catch {}
+      };
+      suggestContextUpdate();
     }catch(e){setError("Failed to save. Please try again.");console.error(e);setLoading(false);}
   };
 
@@ -1536,7 +1597,7 @@ ${summary}`,500);
         <Logo onClick={()=>setView("home")}/>
         <div id="tour-nav" style={{display:"flex",gap:0,flexShrink:0}}>
           {/* FIX #1: Projects tab added */}
-          {[["home","Home"],["projects","Projects"],["todos","My Tasks"],["team","Team"]].map(([v,label])=>(
+          {[["home","Home"],["projects","Projects"],["decisions","Decisions"],["goals","Goals"],["todos","My Tasks"],["team","Team"]].map(([v,label])=>(
             <button key={v} onClick={()=>setView(v)} style={{padding:"5px 10px",fontSize:"13px",fontWeight:view===v?700:400,color:view===v?T.accent:T.mid,background:"transparent",border:"none",borderBottom:view===v?`2px solid ${T.accent}`:"2px solid transparent",cursor:"pointer",fontFamily:T.sans,whiteSpace:"nowrap"}}>{label}</button>
           ))}
         </div>
@@ -1586,6 +1647,122 @@ ${summary}`,500);
   </>);
 
   // ── HOME ──────────────────────────────────────────────────────────────────
+  // ── DECISIONS ─────────────────────────────────────────────────────────────
+  if(view==="decisions") {
+    const allDecisions = projects.flatMap(p=>(p.decisions||[]).map(d=>({...d,projectName:p.name,projIdx:projects.findIndex(pp=>pp.id===p.id)})));
+    const [decFilter,setDecFilter]=useState("__all__");
+    const [decSearch,setDecSearch]=useState("");
+    const filtered = allDecisions.filter(d=>(decFilter==="__all__"||d.project_id===decFilter)&&(decSearch===""||d.decision_text?.toLowerCase().includes(decSearch.toLowerCase())));
+    const sorted = [...filtered].sort((a,b)=>new Date(b.date)-new Date(a.date));
+    return (
+      <Shell>
+        <Nav/>
+        <SectionTitle sub={`${allDecisions.length} decisions across ${projects.length} projects`}>Decision Log</SectionTitle>
+        <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap"}}>
+          <input value={decSearch} onChange={e=>setDecSearch(e.target.value)} placeholder="Search decisions…" style={{...inp,flex:"1 1 180px",fontSize:"13px"}}/>
+          <select value={decFilter} onChange={e=>setDecFilter(e.target.value)} style={{...inp,width:"auto",fontSize:"13px"}}>
+            <option value="__all__">All projects</option>
+            {projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </div>
+        {sorted.length===0?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No decisions found. Decisions are extracted automatically when you add meeting notes.</p></Card>
+        :sorted.map(d=>(
+          <Card key={d.id} style={{marginBottom:8,borderLeft:`3px solid ${pc(d.projIdx)}`}}>
+            <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:8}}>
+              <p style={{margin:0,fontSize:"13px",color:T.ink,lineHeight:1.5,flex:1}}>{d.decision_text}</p>
+              <span style={{fontSize:"11px",color:T.muted,flexShrink:0,marginTop:2}}>{fmt(d.date)}</span>
+            </div>
+            <div style={{marginTop:6,display:"flex",gap:6,alignItems:"center"}}>
+              <Tag color={pc(d.projIdx)} onClick={()=>{setActiveIdx(d.projIdx);setView("project");}}>{d.projectName}</Tag>
+            </div>
+          </Card>
+        ))}
+      </Shell>
+    );
+  }
+
+  // ── GOALS ─────────────────────────────────────────────────────────────────
+  if(view==="goals") {
+    const [editGoal,setEditGoal]=useState(null);
+    const [newTitle,setNewTitle]=useState("");
+    const [newDesc,setNewDesc]=useState("");
+    const [newDate,setNewDate]=useState("");
+    const createGoal=async()=>{
+      if(!newTitle.trim()||!userId)return;
+      const g=await db.createGoal(userId,{title:newTitle.trim(),description:newDesc.trim(),targetDate:newDate||null,owner:data.me||""});
+      setGoals(gs=>[g,...gs]); setNewTitle(""); setNewDesc(""); setNewDate("");
+    };
+    const deleteGoal=async(id)=>{if(!window.confirm("Delete this goal?"))return;await db.deleteGoal(id);setGoals(gs=>gs.filter(g=>g.id!==id));setGoalLinks(ls=>ls.filter(l=>l.goal_id!==id));};
+    const toggleLink=async(goalId,projectId,linked)=>{
+      if(linked){await db.unlinkProjectFromGoal(goalId,projectId);setGoalLinks(ls=>ls.filter(l=>!(l.goal_id===goalId&&l.project_id===projectId)));}
+      else{await db.linkProjectToGoal(goalId,projectId);setGoalLinks(ls=>[...ls,{goal_id:goalId,project_id:projectId}]);}
+    };
+    return (
+      <Shell>
+        <Nav/>
+        <SectionTitle sub="Company-level goals. Link projects to see how work rolls up.">Goals</SectionTitle>
+        <Card style={{marginBottom:12}}>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-end"}}>
+            <div style={{flex:"1 1 160px"}}><Label>Goal title</Label><input value={newTitle} onChange={e=>setNewTitle(e.target.value)} placeholder="e.g. Digital Backbone by Q3" onKeyDown={e=>e.key==="Enter"&&createGoal()} style={inp}/></div>
+            <div style={{flex:"1 1 120px"}}><Label>Description</Label><input value={newDesc} onChange={e=>setNewDesc(e.target.value)} placeholder="Optional" style={inp}/></div>
+            <div style={{flex:"0 0 auto"}}><Label>Target date</Label><input type="date" value={newDate} onChange={e=>setNewDate(e.target.value)} style={{...inp,width:"auto"}}/></div>
+            <Btn onClick={createGoal} disabled={!newTitle.trim()}>+ Add goal</Btn>
+          </div>
+        </Card>
+        {goals.length===0?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No goals yet. Add your first company goal above.</p></Card>
+        :goals.map(g=>{
+          const linked=goalLinks.filter(l=>l.goal_id===g.id);
+          const linkedProjects=linked.map(l=>projects.find(p=>p.id===l.project_id)).filter(Boolean);
+          const greenCount=linkedProjects.filter(p=>p.rag==="green").length;
+          const totalLinked=linkedProjects.length;
+          const pct=totalLinked>0?Math.round((greenCount/totalLinked)*100):0;
+          const daysTo=g.target_date?Math.floor((new Date(g.target_date)-Date.now())/(1000*60*60*24)):null;
+          return (
+            <Card key={g.id} style={{marginBottom:10,borderLeft:`3px solid ${T.accent}`}}>
+              <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:8,gap:8}}>
+                <div style={{flex:1}}>
+                  <h3 style={{margin:"0 0 4px",fontFamily:T.serif,fontSize:"16px",fontWeight:700,color:T.ink}}>{g.title}</h3>
+                  {g.description&&<p style={{margin:"0 0 4px",fontSize:"12px",color:T.muted}}>{g.description}</p>}
+                  {daysTo!==null&&<span style={{fontSize:"11px",color:daysTo<30?T.danger:T.muted}}>📅 {daysTo>0?`${daysTo}d remaining`:"Overdue"}</span>}
+                </div>
+                <div style={{display:"flex",gap:6,flexShrink:0}}>
+                  <button onClick={()=>deleteGoal(g.id)} style={{background:"none",border:"none",cursor:"pointer",fontSize:"13px",color:T.muted,padding:0}}>✕</button>
+                </div>
+              </div>
+              {totalLinked>0&&(
+                <div style={{marginBottom:10}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                    <span style={{fontSize:"11px",color:T.muted}}>Project health progress</span>
+                    <span style={{fontSize:"11px",fontWeight:700,color:pct>=80?"#16A34A":pct>=50?"#F59E0B":"#DC2626"}}>{pct}% on track</span>
+                  </div>
+                  <div style={{background:T.border,borderRadius:2,height:5,overflow:"hidden"}}>
+                    <div style={{background:pct>=80?"#16A34A":pct>=50?"#F59E0B":"#DC2626",height:"100%",width:`${pct}%`,borderRadius:2}}/>
+                  </div>
+                </div>
+              )}
+              <div style={{marginBottom:8}}>
+                <Label>Linked projects</Label>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:4}}>
+                  {linkedProjects.map(p=>(
+                    <span key={p.id} style={{display:"inline-flex",alignItems:"center",gap:4,background:pc(projects.findIndex(pp=>pp.id===p.id))+"20",borderRadius:3,padding:"3px 8px",fontSize:"12px",color:T.ink}}>
+                      {p.rag&&<span style={{width:6,height:6,borderRadius:"50%",background:p.rag==="red"?"#DC2626":p.rag==="amber"?"#F59E0B":"#16A34A",display:"inline-block"}}/>}
+                      {p.name}
+                      <button onClick={()=>toggleLink(g.id,p.id,true)} style={{background:"none",border:"none",cursor:"pointer",fontSize:"11px",color:T.muted,padding:0}}>✕</button>
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <select onChange={e=>{if(e.target.value)toggleLink(g.id,e.target.value,false);e.target.value="";}} style={{...inp,fontSize:"12px",width:"auto"}} defaultValue="">
+                <option value="">+ Link a project…</option>
+                {projects.filter(p=>!linked.find(l=>l.project_id===p.id)).map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </Card>
+          );
+        })}
+      </Shell>
+    );
+  }
+
   if(view==="score") return <ScorePage userId={userId} todos={todos} data={data} onBack={()=>setView("home")}/>;
 
   if(view==="pricing") {
@@ -1683,6 +1860,61 @@ ${summary}`,500);
           </Card>
         );
       })()}
+
+      {/* #3 Commitment nudges */}
+      {(()=>{
+        const overdue = projects.flatMap(p=>(p.commitments||[]).filter(c=>c.status==="open"&&c.date&&Math.floor((Date.now()-new Date(c.date))/(1000*60*60*24))>7).map(c=>({...c,projName:p.name,days:Math.floor((Date.now()-new Date(c.date))/(1000*60*60*24))})));
+        if(!overdue.length) return null;
+        const [open,setOpen]=useState(false);
+        return (
+          <div style={{background:"#FEF3C7",border:"1px solid #F59E0B",borderLeft:"3px solid #F59E0B",padding:"10px 16px",marginBottom:10,fontFamily:T.sans}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontSize:"13px",fontWeight:600,color:"#92400E"}}>⚡ {overdue.length} overdue commitment{overdue.length>1?"s":""} need attention</span>
+              <button onClick={()=>setOpen(o=>!o)} style={{background:"none",border:"none",cursor:"pointer",fontSize:"12px",color:"#92400E",fontFamily:T.sans}}>{open?"Hide ▲":"Review ▼"}</button>
+            </div>
+            {open&&overdue.map(c=>(
+              <div key={c.id} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0",borderBottom:`1px solid #F59E0B30`}}>
+                <span style={{fontSize:"12px",color:"#92400E",flex:1}}>{c.commitment_text} <span style={{color:T.muted}}>· {c.projName} · {c.days}d ago</span></span>
+                <button onClick={()=>db.updateCommitmentStatus(c.id,"done").then(reload)} style={{background:"none",border:"none",fontSize:"11px",color:"#16A34A",cursor:"pointer",padding:0,fontFamily:T.sans,whiteSpace:"nowrap"}}>Mark done</button>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
+
+      {/* #4 Gone quiet projects */}
+      {(()=>{
+        const quiet = projects.filter(p=>{
+          if(!p.notes||p.notes.length===0) return false;
+          const last = Math.max(...p.notes.map(n=>new Date(n.date)));
+          const days = Math.floor((Date.now()-last)/(1000*60*60*24));
+          return days >= (p.quietThreshold||7);
+        });
+        if(!quiet.length) return null;
+        return (
+          <div style={{background:"#F3F4F6",border:"1px solid #D1D5DB",borderLeft:"3px solid #6B7280",padding:"10px 16px",marginBottom:10,fontFamily:T.sans}}>
+            <span style={{fontSize:"13px",fontWeight:600,color:T.ink}}>🔇 {quiet.length} project{quiet.length>1?"s":""} gone quiet</span>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:6}}>
+              {quiet.map(p=>{
+                const days=Math.floor((Date.now()-Math.max(...p.notes.map(n=>new Date(n.date))))/(1000*60*60*24));
+                return <button key={p.id} onClick={()=>{setActiveIdx(projects.findIndex(pp=>pp.id===p.id));setView("project");}} style={{fontSize:"12px",color:T.accent,background:"none",border:`1px solid ${T.border}`,borderRadius:3,padding:"3px 10px",cursor:"pointer",fontFamily:T.sans}}>{p.name} · {days}d</button>;
+              })}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* #7 Cross-project risk correlation */}
+      {crossRisks.length>0&&(
+        <div style={{background:"#FEF2F2",border:"1px solid #FECACA",borderLeft:"3px solid #DC2626",padding:"10px 16px",marginBottom:10,fontFamily:T.sans}}>
+          <span style={{fontSize:"13px",fontWeight:600,color:"#991B1B"}}>🔗 Cross-project risk pattern detected</span>
+          {crossRisks.map((cr,i)=>(
+            <div key={i} style={{marginTop:6,fontSize:"12px",color:"#991B1B"}}>
+              <strong>{cr.theme}</strong> — {cr.summary} <span style={{color:T.muted}}>({cr.projects?.join(", ")})</span>
+            </div>
+          ))}
+        </div>
+      )}
 
       <WinToday userId={userId} todos={todos} projects={projects}/>
 
@@ -2144,6 +2376,7 @@ ${summary}`,500);
           ["decisions",`Decisions (${(activeProject.decisions||[]).length})`],
           ["commitments",`Commitments (${(activeProject.commitments||[]).filter(c=>c.status==="open").length} open)`],
           ["risks",`Risks (${(activeProject.risks||[]).filter(r=>!r.dismissed).length})`],
+          ["stakeholders","Stakeholders"],
         ].map(([tab,label])=>(
           <button key={tab} onClick={()=>setActiveProjectTab(tab)} style={{padding:"7px 14px",fontSize:"12px",fontWeight:activeProjectTab===tab?700:400,color:activeProjectTab===tab?T.accent:T.mid,background:"transparent",border:"none",borderBottom:activeProjectTab===tab?`2px solid ${T.accent}`:"2px solid transparent",cursor:"pointer",fontFamily:T.sans,whiteSpace:"nowrap"}}>{label}</button>
         ))}
@@ -2215,7 +2448,6 @@ ${summary}`,500);
           ?<Card>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                 <p style={{color:T.muted,fontSize:"13px",margin:0}}>No active risks.</p>
-                {/* FIX #6: manual re-evaluate button on risks tab */}
                 {activeProject.notes.length>0&&<Btn size="sm" variant="secondary" onClick={async()=>{setRiskLoading(true);try{const d=await db.loadAll(userId);const p=d.projects.find(pp=>pp.id===activeProject.id);if(p)await reevaluateRisks(p.id,p,userId);await reload();}finally{setRiskLoading(false);}}} disabled={riskLoading}>{riskLoading?"Re-evaluating…":"↻ Re-evaluate"}</Btn>}
               </div>
             </Card>
@@ -2236,6 +2468,72 @@ ${summary}`,500);
               </Card>
             ))}
           </>
+      )}
+
+      {/* #6 Stakeholder Map */}
+      {activeProjectTab==="stakeholders"&&(()=>{
+        const projMembers = members.filter(m=>
+          activeProject.notes.some(n=>n.taggedMembers?.includes(m.id)||n.raw?.toLowerCase().includes(m.name.toLowerCase()))
+        );
+        if(projMembers.length===0) return <Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No team members tagged in notes yet. Use @name in your meeting notes.</p></Card>;
+        return (
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:10}}>
+            {projMembers.map(m=>{
+              const mc=projects.flatMap(p=>(p.commitments||[]).filter(c=>c.member_id===m.id));
+              const projComm=activeProject.commitments.filter(c=>c.member_id===m.id);
+              const done=projComm.filter(c=>c.status==="done").length;
+              const total=projComm.length;
+              const pct=total>0?Math.round((done/total)*100):null;
+              const relColor=pct===null?T.muted:pct>=80?"#16A34A":pct>=50?"#F59E0B":"#DC2626";
+              const mentions=activeProject.notes.filter(n=>n.taggedMembers?.includes(m.id)||n.raw?.toLowerCase().includes(m.name.toLowerCase())).length;
+              const lastMention=activeProject.notes.filter(n=>n.taggedMembers?.includes(m.id)).sort((a,b)=>new Date(b.date)-new Date(a.date))[0];
+              return (
+                <Card key={m.id} style={{marginBottom:0,cursor:"pointer"}} onClick={()=>{setActiveMemberId(m.id);setView("memberView");}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                    <Av name={m.name} size={32}/>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontWeight:600,fontSize:"13px",color:T.ink,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{m.name}</div>
+                      {m.role&&<div style={{fontSize:"11px",color:T.muted}}>{m.role}</div>}
+                    </div>
+                  </div>
+                  <div style={{display:"flex",gap:12,fontSize:"11px",color:T.muted,marginBottom:6}}>
+                    <span>{mentions} mentions</span>
+                    <span>{total} commitments</span>
+                  </div>
+                  {pct!==null&&(
+                    <div>
+                      <div style={{background:T.border,borderRadius:2,height:4,overflow:"hidden"}}>
+                        <div style={{background:relColor,height:"100%",width:`${pct}%`,borderRadius:2}}/>
+                      </div>
+                      <div style={{display:"flex",justifyContent:"space-between",marginTop:3}}>
+                        <span style={{fontSize:"10px",color:relColor,fontWeight:600}}>{pct>=80?"Reliable":pct>=50?"Inconsistent":"Needs attention"}</span>
+                        <span style={{fontSize:"10px",color:T.muted}}>{pct}%</span>
+                      </div>
+                    </div>
+                  )}
+                  {lastMention&&<div style={{fontSize:"10px",color:T.muted,marginTop:4}}>Last: {fmt(lastMention.date)}</div>}
+                </Card>
+              );
+            })}
+          </div>
+        );
+      })()}
+
+      {/* #8 Context suggestion banner */}
+      {contextSuggestion&&contextSuggestion.projectId===activeProject.id&&(
+        <div style={{background:"#EFF6FF",border:"1px solid #BFDBFE",borderLeft:"3px solid #3B82F6",padding:"12px 16px",marginTop:10,fontFamily:T.sans}}>
+          <div style={{fontSize:"12px",fontWeight:700,color:"#1E40AF",marginBottom:6}}>💡 Debrief noticed a context update</div>
+          <p style={{margin:"0 0 10px",fontSize:"13px",color:"#1E3A8A"}}>{contextSuggestion.suggestion}</p>
+          <div style={{display:"flex",gap:8}}>
+            <Btn size="sm" onClick={async()=>{
+              const newCtx = (activeProject.context?activeProject.context+"\n\n":"")+contextSuggestion.suggestion;
+              await db.updateProjectContext(activeProject.id,newCtx);
+              setData(d=>({...d,projects:d.projects.map(p=>p.id===activeProject.id?{...p,context:newCtx}:p)}));
+              setContextSuggestion(null); setToast("Context updated");
+            }}>Accept</Btn>
+            <Btn size="sm" variant="secondary" onClick={()=>setContextSuggestion(null)}>Dismiss</Btn>
+          </div>
+        </div>
       )}
     </Shell>
   );
