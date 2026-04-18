@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from "react";
+\import React, { useState, useEffect, useRef, useMemo } from "react";
 import { supabase } from "./AuthWrapper.jsx";
 
 const T = {
@@ -752,7 +752,8 @@ const NoteTextarea=({onSubmit,onCancel,loading,error,projectName,meName,members,
 };
 
 // ─── Todo Item ────────────────────────────────────────────────────────────────
-const TodoItem=({todo,projects,members,onToggle,onDelete,onProjectNav,onReassignProject,onEdit,onEditMember})=>{\n  const proj=todo.projectId?projects.find(p=>p.id===todo.projectId):null;
+const TodoItem=({todo,projects,members,onToggle,onDelete,onProjectNav,onReassignProject,onEdit,onEditMember})=>{
+  const proj=todo.projectId?projects.find(p=>p.id===todo.projectId):null;
   const projIdx=proj?projects.findIndex(p=>p.id===todo.projectId):-1;
   const assignedMember=todo.memberId?members.find(m=>m.id===todo.memberId):null;
   const overdue=!todo.done&&isOverdue(todo.dueDate);
