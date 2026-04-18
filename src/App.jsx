@@ -95,7 +95,7 @@ const db = {
         risks: allRisks.filter(r=>r.project_id===p.id && !r.dismissed),
       })),
       members:members||[],
-      todos:(todos||[]).map(t=>({...t,dueDate:t.due_date,projectId:t.project_id,doneAt:t.done_at,memberId:t.member_id})),
+      todos:(todos||[]).map(t=>({...t,dueDate:t.due_date,projectId:t.project_id,doneAt:t.done_at,memberId:t.member_id,createdAt:t.created_at})),
       // global undismissed risks for Risk Radar
       risks: allRisks.filter(r=>!r.dismissed),
       me:profile?.name||null, tourDone:profile?.tour_done||false,
@@ -228,6 +228,9 @@ const db = {
   },
   async updateTodo(todoId, {text, dueDate}) {
     await supabase.from('todos').update({text, due_date:dueDate||null}).eq('id',todoId);
+  },
+  async updateTodoMember(todoId, memberId) {
+    await supabase.from('todos').update({member_id:memberId||null}).eq('id',todoId);
   },
   async deleteTodo(todoId) { await supabase.from('todos').delete().eq('id',todoId); },
   async upsertHomeSummary(userId,summary) { await supabase.from('home_summaries').upsert({user_id:userId,summary,updated_at:new Date().toISOString()}); },
@@ -623,7 +626,19 @@ const SearchAskOverlay = ({projects,members,todos,onClose,onProjectNav}) => {
         {mode==="search"&&q.trim()&&results.length===0&&<div style={{background:T.white,borderRadius:4,padding:"24px",textAlign:"center",color:T.muted,fontSize:"14px"}}>No results. Try asking a question — type "?" at the end.</div>}
         {!q.trim()&&<div style={{background:T.white,borderRadius:4,padding:"20px 16px"}}>
           <p style={{margin:"0 0 12px",fontSize:"11px",fontWeight:700,letterSpacing:"0.06em",color:T.muted,textTransform:"uppercase"}}>Try asking</p>
-          {["Who hasn't closed a commitment in 14 days?","Which projects have gone quiet this week?","What happens if Rahul doesn't deliver this week?","Show me all decisions we made about vendors","Which project is most at risk of slipping?"].map((s,i)=>(
+          {(projects.length>0?[
+            `Which projects have gone quiet this week?`,
+            members.length>0?`What has ${members[0].name} committed to?`:`Who hasn't closed a commitment in 14 days?`,
+            projects.length>0?`What happens if ${projects[0].name} slips?`:`Which project is most at risk of slipping?`,
+            `Show me all decisions made in the last 30 days`,
+            projects.length>1?`Compare health of ${projects[0].name} vs ${projects[1].name}`:`What are the biggest risks across all projects?`,
+          ]:[
+            "Who hasn't closed a commitment in 14 days?",
+            "Which projects have gone quiet this week?",
+            "What happens if Rahul doesn't deliver this week?",
+            "Show me all decisions we made about vendors",
+            "Which project is most at risk of slipping?",
+          ]).map((s,i)=>(
             <button key={i} onClick={()=>{setQ(s);setTimeout(()=>handleAsk(),100);}} style={{display:"block",width:"100%",textAlign:"left",padding:"8px 0",fontSize:"13px",color:T.accentMid,background:"none",border:"none",borderBottom:`1px solid ${T.border}`,cursor:"pointer",fontFamily:T.sans}}>{s}</button>
           ))}
         </div>}
@@ -672,12 +687,33 @@ const Tour=({onDone})=>{
 };
 
 // ─── Note Textarea ────────────────────────────────────────────────────────────
-const NoteTextarea=({onSubmit,onCancel,loading,error,projectName,meName,members})=>{
-  const ref=useRef(null); const [show,setShow]=useState(false); const [q,setQ]=useState(""); const [dropPos,setDropPos]=useState(0);
+const NoteTextarea=({onSubmit,onCancel,loading,error,projectName,meName,members,onNewMember})=>{
+  const ref=useRef(null); const [show,setShow]=useState(false); const [q,setQ]=useState(""); const [dropPos,setDropPos]=useState(0); const [dropIdx,setDropIdx]=useState(0);
   const all=useMemo(()=>[{id:"me",name:meName,isSelf:true},...members.map(m=>({...m,isSelf:false}))],[meName,members]);
   const filtered=all.filter(m=>m.name.toLowerCase().includes(q.toLowerCase()));
-  const handleChange=e=>{const val=e.target.value,cur=e.target.selectionStart,before=val.slice(0,cur);const match=before.match(/@([\w][\w ]*)$/);if(match){setQ(match[1]);setShow(true);setDropPos(cur-match[0].length);}else setShow(false);};
+  const handleChange=e=>{const val=e.target.value,cur=e.target.selectionStart,before=val.slice(0,cur);const match=before.match(/@([\w][\w ]*)$/);if(match){setQ(match[1]);setShow(true);setDropPos(cur-match[0].length);setDropIdx(0);}else setShow(false);};
   const insert=name=>{const ta=ref.current,val=ta.value,before=val.slice(0,dropPos),rest=val.slice(dropPos).replace(/^@[\w ]*/,"");ta.value=before+`@${name}`+(rest.startsWith(" ")?rest:" "+rest);setShow(false);ta.focus();};
+  const handleKeyDown=e=>{
+    if(show&&filtered.length>0){
+      if(e.key==="Tab"||e.key==="Enter"){e.preventDefault();insert(filtered[dropIdx]?.name||filtered[0].name);return;}
+      if(e.key==="ArrowDown"){e.preventDefault();setDropIdx(i=>Math.min(i+1,filtered.length-1));return;}
+      if(e.key==="ArrowUp"){e.preventDefault();setDropIdx(i=>Math.max(i-1,0));return;}
+      if(e.key==="Escape"){setShow(false);return;}
+    }
+  };
+  const handleSubmit=()=>{
+    const val=ref.current?.value||"";
+    // Detect @mentions that aren't existing members
+    const mentioned=val.match(/@([\w][\w ]*)/g)||[];
+    const newNames=mentioned.map(m=>m.slice(1).trim()).filter(name=>
+      name&&!all.some(m=>m.name.toLowerCase()===name.toLowerCase())
+    );
+    if(newNames.length>0&&onNewMember){
+      onNewMember(newNames,()=>onSubmit(val));
+    } else {
+      onSubmit(val);
+    }
+  };
   const applyTemplate=tmpl=>{ ref.current.value=tmpl.structure.replace(/\[YourName\]/g,meName); ref.current.focus(); };
   return (
     <Card>
@@ -685,7 +721,7 @@ const NoteTextarea=({onSubmit,onCancel,loading,error,projectName,meName,members}
         <h2 style={{margin:0,fontSize:"18px",fontWeight:700,fontFamily:T.serif,color:T.ink}}>Add Meeting Notes</h2>
         <p style={{margin:"2px 0 0",fontSize:"12px",color:T.muted}}>Saving to: {projectName}</p>
       </div>
-      <p style={{fontSize:"12px",color:T.muted,margin:"0 0 8px"}}>Type @ to tag people. Decisions, commitments and risks will be auto-extracted.</p>
+      <p style={{fontSize:"12px",color:T.muted,margin:"0 0 8px"}}>Type @ to tag people. Tab to autocomplete. Decisions, commitments and risks will be auto-extracted.</p>
       <div style={{marginBottom:10}}>
         <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
           <span style={{fontSize:"11px",color:T.muted,fontWeight:600,letterSpacing:"0.05em",textTransform:"uppercase"}}>Template:</span>
@@ -698,34 +734,36 @@ const NoteTextarea=({onSubmit,onCancel,loading,error,projectName,meName,members}
         </div>
       </div>
       <div style={{position:"relative"}}>
-        <textarea ref={ref} onChange={handleChange} placeholder="Paste raw notes, transcript, or pick a template above…" style={{...inp,height:200,resize:"vertical",lineHeight:1.65}}/>
+        <textarea ref={ref} onChange={handleChange} onKeyDown={handleKeyDown} placeholder="Paste raw notes, transcript, or pick a template above…" style={{...inp,height:200,resize:"vertical",lineHeight:1.65}}/>
         {show&&filtered.length>0&&(
           <div style={{position:"absolute",top:"100%",left:0,right:0,background:T.white,border:`1px solid ${T.border}`,borderRadius:2,boxShadow:"0 4px 12px rgba(0,0,0,0.08)",zIndex:20}}>
-            {filtered.map(m=>(<div key={m.id} onMouseDown={e=>{e.preventDefault();insert(m.name);}} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",cursor:"pointer",fontSize:"13px",color:T.ink,borderBottom:`1px solid ${T.border}`}}><Av name={m.name} size={20} isSelf={m.isSelf}/>{m.name}{m.isSelf&&" (you)"}</div>))}
+            {filtered.map((m,i)=>(<div key={m.id} onMouseDown={e=>{e.preventDefault();insert(m.name);}} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",cursor:"pointer",fontSize:"13px",color:T.ink,borderBottom:`1px solid ${T.border}`,background:i===dropIdx?T.accentLight:"transparent"}}><Av name={m.name} size={20} isSelf={m.isSelf}/>{m.name}{m.isSelf&&" (you)"}</div>))}
+            <div style={{padding:"4px 12px",fontSize:"10px",color:T.muted}}>↑↓ navigate · Tab or Enter to select</div>
           </div>
         )}
       </div>
       {error&&<p style={{color:T.danger,fontSize:"12px",margin:"6px 0 0"}}>{error}</p>}
       <div style={{display:"flex",gap:8,marginTop:12}}>
-        <Btn onClick={()=>onSubmit(ref.current?.value||"")} disabled={loading}>{loading?"Analysing…":"Analyse & Save"}</Btn>
+        <Btn onClick={handleSubmit} disabled={loading}>{loading?"Analysing…":"Analyse & Save"}</Btn>
         <Btn variant="secondary" onClick={onCancel}>Cancel</Btn>
       </div>
     </Card>
   );
 };
 
-// ─── Todo Item (FIX #3: project tag click opens reassign picker) ──────────────
-const TodoItem=({todo,projects,members,onToggle,onDelete,onProjectNav,onReassignProject,onEdit})=>{
-  const proj=todo.projectId?projects.find(p=>p.id===todo.projectId):null;
+// ─── Todo Item ────────────────────────────────────────────────────────────────
+const TodoItem=({todo,projects,members,onToggle,onDelete,onProjectNav,onReassignProject,onEdit,onEditMember})=>{\n  const proj=todo.projectId?projects.find(p=>p.id===todo.projectId):null;
   const projIdx=proj?projects.findIndex(p=>p.id===todo.projectId):-1;
   const assignedMember=todo.memberId?members.find(m=>m.id===todo.memberId):null;
   const overdue=!todo.done&&isOverdue(todo.dueDate);
   const [editing,setEditing]=useState(false);
   const [editText,setEditText]=useState(todo.text);
   const [editDue,setEditDue]=useState(todo.dueDate||"");
+  const [editMemberId,setEditMemberId]=useState(todo.memberId||"");
   const saveEdit=async()=>{
     if(!editText.trim())return;
     await onEdit(todo.id,{text:editText.trim(),dueDate:editDue||null});
+    if(editMemberId!==todo.memberId) onEditMember&&await onEditMember(todo.id,editMemberId||null);
     setEditing(false);
   };
   if(editing) return (
@@ -733,14 +771,20 @@ const TodoItem=({todo,projects,members,onToggle,onDelete,onProjectNav,onReassign
       <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"flex-end"}}>
         <input value={editText} onChange={e=>setEditText(e.target.value)} onKeyDown={e=>e.key==="Enter"&&saveEdit()} autoFocus style={{...inp,flex:"1 1 160px",fontSize:"13px",padding:"6px 9px"}}/>
         <input type="date" value={editDue} onChange={e=>setEditDue(e.target.value)} style={{...inp,width:"auto",fontSize:"12px",padding:"6px 9px"}}/>
+        <select value={editMemberId} onChange={e=>setEditMemberId(e.target.value)} style={{...inp,width:"auto",fontSize:"12px",padding:"6px 9px"}}>
+          <option value="">No assignee</option>
+          {members.map(m=><option key={m.id} value={m.id}>{m.name}</option>)}
+        </select>
         <Btn size="sm" onClick={saveEdit} disabled={!editText.trim()}>Save</Btn>
-        <Btn size="sm" variant="secondary" onClick={()=>{setEditing(false);setEditText(todo.text);setEditDue(todo.dueDate||"");}}>Cancel</Btn>
+        <Btn size="sm" variant="secondary" onClick={()=>{setEditing(false);setEditText(todo.text);setEditDue(todo.dueDate||"");setEditMemberId(todo.memberId||"");}}>Cancel</Btn>
       </div>
     </div>
   );
   return (
     <div style={{display:"flex",alignItems:"flex-start",gap:10,padding:"9px 0",borderBottom:`1px solid ${T.border}`}}>
-      <input type="checkbox" checked={!!todo.done} onChange={()=>onToggle(todo.id)} style={{marginTop:3,accentColor:T.accent,cursor:"pointer",flexShrink:0}}/>
+      <button onClick={()=>onToggle(todo.id)} style={{flexShrink:0,marginTop:2,width:18,height:18,borderRadius:3,border:`2px solid ${todo.done?"#16A34A":T.border}`,background:todo.done?"#16A34A":"transparent",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",padding:0}}>
+        {todo.done&&<span style={{color:"#fff",fontSize:"11px",fontWeight:700,lineHeight:1}}>✓</span>}
+      </button>
       <div style={{flex:1,minWidth:0}}>
         <p style={{margin:0,fontSize:"13px",color:T.ink,textDecoration:todo.done?"line-through":"none",lineHeight:1.5,wordBreak:"break-word"}}>{todo.text}</p>
         <div style={{display:"flex",gap:5,marginTop:3,flexWrap:"wrap",alignItems:"center"}}>
@@ -753,6 +797,7 @@ const TodoItem=({todo,projects,members,onToggle,onDelete,onProjectNav,onReassign
           }
           {assignedMember&&<Tag color={avatarBg(assignedMember.name)}>{assignedMember.name}</Tag>}
           {todo.dueDate&&<span style={{fontSize:"11px",color:overdue?T.danger:T.muted,fontWeight:overdue?600:400}}>{overdue?"Overdue · ":""}{fmtShort(todo.dueDate)}</span>}
+          {todo.createdAt&&<span style={{fontSize:"10px",color:T.muted}}>Added {fmt(todo.createdAt)}</span>}
           {todo.source==="ai"&&<span style={{fontSize:"10px",color:T.muted,letterSpacing:"0.05em"}}>AUTO</span>}
         </div>
       </div>
@@ -1110,11 +1155,11 @@ const WinToday = ({userId, todos, projects}) => {
 };
 
 // ─── ThisWeekList — proper component so useState is legal ────────────────────
-const ThisWeekList = ({todos,projects,members,onToggle,onDelete,onEdit,onProjectNav,onReassign}) => {
+const ThisWeekList = ({todos,projects,members,onToggle,onDelete,onEdit,onEditMember,onProjectNav,onReassign}) => {
   const [showAll,setShowAll] = useState(false);
   const visible = showAll ? todos : todos.slice(0,5);
   return (<>
-    {visible.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={onToggle} onDelete={onDelete} onEdit={onEdit} onProjectNav={onProjectNav} onReassignProject={onReassign}/>)}
+    {visible.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={onToggle} onDelete={onDelete} onEdit={onEdit} onEditMember={onEditMember} onProjectNav={onProjectNav} onReassignProject={onReassign}/>)}
     {todos.length>5&&<button onClick={()=>setShowAll(s=>!s)} style={{marginTop:8,fontSize:"12px",color:T.accentMid,background:"none",border:"none",cursor:"pointer",fontFamily:T.sans,padding:0}}>{showAll?`Show less ↑`:`Show all ${todos.length} tasks ↓`}</button>}
   </>);
 };
@@ -1221,6 +1266,9 @@ export default function App() {
   const [decFilter,setDecFilter]=useState("__all__");
   const [decSearch,setDecSearch]=useState("");
   const [nudgeOpen,setNudgeOpen]=useState(false);
+  const [newMemberPrompt,setNewMemberPrompt]=useState(null); // {names,onConfirm}
+  const [editingStatus,setEditingStatus]=useState(false);
+  const [statusRefreshing,setStatusRefreshing]=useState(false);
   const [pricingIndia,setPricingIndia]=useState(false);
   const [annual,setAnnual]=useState(true);
   useEffect(()=>{ fetch("https://ipapi.co/json/").then(r=>r.json()).then(d=>{ if(d.country_code==="IN") setPricingIndia(true); }).catch(()=>{}); },[]);
@@ -1392,6 +1440,10 @@ ${summary}`,500);
     await db.updateTodoText(id,text,dueDate);
     setData(d=>({...d,todos:d.todos.map(t=>t.id===id?{...t,text,dueDate}:t)}));
   };
+  const editTodoMember=async(id,memberId)=>{
+    await db.updateTodoMember(id,memberId);
+    setData(d=>({...d,todos:d.todos.map(t=>t.id===id?{...t,memberId}:t)}));
+  };
 
   // FIX #3: reassign todo project
   const handleReassignProject=async(todoId, newProjectId)=>{
@@ -1475,7 +1527,11 @@ ${summary}`,500);
       // ── Navigate immediately — user can see the note now ──────────────────
       setNotes(""); setQuestions([]); setAnswers({}); setTaggedMembers([]); setTaggedSelf(false);
       taggedMembersRef.current=[]; taggedSelfRef.current=false;
-      setNotePhase("input"); setLoading(false); setView("project");
+      setNotePhase("input"); setLoading(false);
+      setExpandedNote(note.id); // auto-expand latest note
+      setActiveProjectTab("notes"); // go to notes tab
+      setView("project");
+      setToast("✓ Meeting note saved — AI is extracting decisions, commitments & risks…");
       await reload(); // refresh so note appears
 
       // ── All remaining AI runs silently in background ──────────────────────
@@ -1597,38 +1653,35 @@ ${summary}`,500);
   const undatedTodos=pendingTodos.filter(t=>!t.dueDate&&!isThisWeek(t.createdAt));
 
   // ─── Nav (FIX #1: added Projects tab) ────────────────────────────────────────
-  const Nav=()=>(
-    <div style={{marginBottom:24,paddingBottom:14,borderBottom:`1px solid ${T.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
-      <div style={{display:"flex",alignItems:"center",gap:12,minWidth:0,flex:"1 1 auto",overflowX:"auto"}}>
+  const Nav=()=>(<>
+    <div style={{marginBottom:16,paddingBottom:10,borderBottom:`1px solid ${T.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0,overflowX:"auto",flex:"1 1 auto"}}>
         <Logo onClick={()=>setView("home")}/>
         <div id="tour-nav" style={{display:"flex",gap:0,flexShrink:0}}>
-          {/* FIX #1: Projects tab added */}
-          {[["home","Home"],["projects","Projects"],["decisions","Decisions"],["goals","Goals"],["todos","My Tasks"],["team","Team"]].map(([v,label])=>(
-            <button key={v} onClick={()=>setView(v)} style={{padding:"5px 10px",fontSize:"13px",fontWeight:view===v?700:400,color:view===v?T.accent:T.mid,background:"transparent",border:"none",borderBottom:view===v?`2px solid ${T.accent}`:"2px solid transparent",cursor:"pointer",fontFamily:T.sans,whiteSpace:"nowrap"}}>{label}</button>
+          {[["home","Home"],["projects","Projects"],["decisions","Decisions"],["goals","Goals"],["todos","Tasks"],["team","Team"]].map(([v,label])=>(
+            <button key={v} onClick={()=>setView(v)} style={{padding:"5px 9px",fontSize:"12px",fontWeight:view===v?700:400,color:view===v?T.accent:T.mid,background:"transparent",border:"none",borderBottom:view===v?`2px solid ${T.accent}`:"2px solid transparent",cursor:"pointer",fontFamily:T.sans,whiteSpace:"nowrap"}}>{label}</button>
           ))}
         </div>
       </div>
-      <div style={{display:"flex",alignItems:"center",gap:8}}>
-        {data?.me&&<div style={{display:"flex",alignItems:"center",gap:5}}><Av name={data.me} size={22} isSelf/><span style={{fontSize:"12px",color:T.mid}}>{data.me}</span></div>}
+      <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
+        {data?.me&&<Av name={data.me} size={22} isSelf title={data.me}/>}
         {navScore!==null&&(
-          <div onClick={()=>setView("score")} title="Debrief Score — click for details" style={{cursor:"pointer",background:navScore.color+"18",border:`1px solid ${navScore.color}40`,borderRadius:3,padding:"2px 8px",display:"flex",alignItems:"center",gap:4}}>
+          <div onClick={()=>setView("score")} title="Debrief Score" style={{cursor:"pointer",background:navScore.color+"18",border:`1px solid ${navScore.color}40`,borderRadius:3,padding:"2px 7px"}}>
             <span style={{fontSize:"12px",fontWeight:700,color:navScore.color}}>{navScore.score}</span>
           </div>
         )}
         {undismissedRisks.length>0&&(
-          <div onClick={()=>setView("home")} style={{position:"relative",cursor:"pointer"}} title={`${undismissedRisks.length} active risk${undismissedRisks.length>1?"s":""}`}>
+          <div onClick={()=>setView("home")} style={{position:"relative",cursor:"pointer"}} title={`${undismissedRisks.length} risks`}>
             <span style={{fontSize:"13px",color:T.danger}}>⚠</span>
             <span style={{position:"absolute",top:-4,right:-4,background:T.danger,color:"#fff",borderRadius:"50%",width:14,height:14,fontSize:"9px",fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center"}}>{undismissedRisks.length}</span>
           </div>
         )}
-        <div id="tour-project">
-          <Btn size="sm" onClick={()=>{setNewProjName("");setNewProjContext("");setNewProjDeadline("");setView("newProject");}}>+ Project</Btn>
-        </div>
-        <Btn size="sm" variant="secondary" onClick={()=>setView("pricing")} style={{fontSize:"11px",padding:"4px 8px"}}>Pricing</Btn>
-        <Btn size="sm" variant="secondary" onClick={signOut} style={{fontSize:"11px",padding:"4px 8px"}}>Sign out</Btn>
+        <div id="tour-project"><Btn size="sm" onClick={()=>{setNewProjName("");setNewProjContext("");setNewProjDeadline("");setView("newProject");}}>+ Project</Btn></div>
+        <Btn size="sm" variant="secondary" onClick={()=>setView("pricing")} style={{fontSize:"11px",padding:"4px 7px"}}>Pricing</Btn>
+        <Btn size="sm" variant="secondary" onClick={signOut} style={{fontSize:"11px",padding:"4px 7px"}}>Sign out</Btn>
       </div>
     </div>
-  );
+  </>);
 
   const SectionTitle=({children,sub})=>(<div style={{marginBottom:14}}><h2 style={{margin:0,fontSize:"18px",fontWeight:700,fontFamily:T.serif,color:T.ink,letterSpacing:"-0.01em"}}>{children}</h2>{sub&&<p style={{margin:"2px 0 0",fontSize:"12px",color:T.muted}}>{sub}</p>}</div>);
   const SearchEl=()=>showSearch?<SearchAskOverlay projects={projects} members={members} todos={todos} onClose={()=>setShowSearch(false)} onProjectNav={i=>{setActiveIdx(i);setView("project");}}/>:null;
@@ -1650,6 +1703,28 @@ ${summary}`,500);
   const GlobalPickers = () => (<>
     {reassignTodo&&<ProjectTagPicker projects={projects} currentProjectId={reassignTodo.currentProjectId} onSelect={newProjId=>handleReassignProject(reassignTodo.id,newProjId)} onClose={()=>setReassignTodo(null)}/>}
     {ragPickerProjectId&&<RagPicker current={projects.find(p=>p.id===ragPickerProjectId)?.rag} onSelect={async rag=>{await db.updateProjectRag(ragPickerProjectId,rag,true);await reload();}} onClose={()=>setRagPickerProjectId(null)}/>}
+    {newMemberPrompt&&(
+      <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:2000,display:"flex",alignItems:"center",justifyContent:"center",padding:20}} onClick={()=>setNewMemberPrompt(null)}>
+        <div style={{background:"#fff",borderRadius:6,padding:24,maxWidth:360,width:"100%",fontFamily:T.sans}} onClick={e=>e.stopPropagation()}>
+          <h3 style={{margin:"0 0 8px",fontFamily:T.serif,fontSize:"16px",color:T.ink}}>Add new team member{newMemberPrompt.names.length>1?"s":""}?</h3>
+          <p style={{margin:"0 0 16px",fontSize:"13px",color:T.mid}}>Found new name{newMemberPrompt.names.length>1?"s":""} in your notes:</p>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:16}}>
+            {newMemberPrompt.names.map(n=><span key={n} style={{background:T.accentLight,border:`1px solid ${T.accent}30`,borderRadius:3,padding:"3px 10px",fontSize:"13px",fontWeight:600,color:T.accent}}>@{n}</span>)}
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <Btn onClick={async()=>{
+              for(const name of newMemberPrompt.names){
+                const m=await db.createMember(userId,{name,role:""});
+                setData(d=>({...d,members:[...d.members,m]}));
+              }
+              newMemberPrompt.onConfirm();
+              setNewMemberPrompt(null);
+            }}>Add as team member{newMemberPrompt.names.length>1?"s":""}</Btn>
+            <Btn variant="secondary" onClick={()=>{newMemberPrompt.onConfirm();setNewMemberPrompt(null);}}>Skip, save anyway</Btn>
+          </div>
+        </div>
+      </div>
+    )}
   </>);
 
   // ── HOME ──────────────────────────────────────────────────────────────────
@@ -1878,21 +1953,22 @@ ${summary}`,500);
         );
       })()}
 
-      {/* #4 Gone quiet projects */}
+      {/* #4 Gone quiet — no meeting notes added in quiet_threshold days */}
       {(()=>{
         const quiet = projects.filter(p=>{
           if(!p.notes||p.notes.length===0) return false;
-          const last = Math.max(...p.notes.map(n=>new Date(n.date)));
-          const days = Math.floor((Date.now()-last)/(1000*60*60*24));
+          const lastNoteDate = Math.max(...p.notes.map(n=>new Date(n.date).getTime()));
+          const days = Math.floor((Date.now()-lastNoteDate)/(1000*60*60*24));
           return days >= (p.quietThreshold||7);
         });
         if(!quiet.length) return null;
         return (
           <div style={{background:"#F3F4F6",border:"1px solid #D1D5DB",borderLeft:"3px solid #6B7280",padding:"10px 16px",marginBottom:10,fontFamily:T.sans}}>
-            <span style={{fontSize:"13px",fontWeight:600,color:T.ink}}>🔇 {quiet.length} project{quiet.length>1?"s":""} gone quiet</span>
-            <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:6}}>
+            <span style={{fontSize:"13px",fontWeight:600,color:T.ink}}>🔇 No meeting notes added recently</span>
+            <p style={{margin:"2px 0 6px",fontSize:"11px",color:T.muted}}>These projects haven't had new meeting notes in {quiet[0]?.quietThreshold||7}+ days</p>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
               {quiet.map(p=>{
-                const days=Math.floor((Date.now()-Math.max(...p.notes.map(n=>new Date(n.date))))/(1000*60*60*24));
+                const days=Math.floor((Date.now()-Math.max(...p.notes.map(n=>new Date(n.date).getTime())))/(1000*60*60*24));
                 return <button key={p.id} onClick={()=>{setActiveIdx(projects.findIndex(pp=>pp.id===p.id));setView("project");}} style={{fontSize:"12px",color:T.accent,background:"none",border:`1px solid ${T.border}`,borderRadius:3,padding:"3px 10px",cursor:"pointer",fontFamily:T.sans}}>{p.name} · {days}d</button>;
               })}
             </div>
@@ -1933,7 +2009,7 @@ ${summary}`,500);
           {(()=>{
             const allWeek=[...overdueTodos,...thisWeekTodos];
             if(allWeek.length===0) return <p style={{fontSize:"12px",color:T.muted,margin:0}}>No tasks due this week.</p>;
-            return <ThisWeekList todos={allWeek} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassign={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>;
+            return <ThisWeekList todos={allWeek} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onEditMember={editTodoMember} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassign={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>;
           })()}
         </Card>
         {/* FIX #5: Projects card — show all with scroll */}
@@ -2124,15 +2200,15 @@ ${summary}`,500);
       {isFiltered ? (
         dueFiltered.length===0
           ? <Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No tasks match these filters.</p></Card>
-          : <Card>{dueFiltered.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card>
+          : <Card>{dueFiltered.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onEditMember={editTodoMember} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card>
       ) : todoFilter==="pending" ? (<>
-        {overdueTodos.length>0&&<><GroupLabel color={T.danger}>Overdue</GroupLabel><Card>{overdueTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card></>}
-        {thisWeekTodos.length>0&&<><GroupLabel>This Week</GroupLabel><Card>{thisWeekTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card></>}
-        {upcomingTodos.length>0&&<><GroupLabel>Upcoming</GroupLabel><Card>{upcomingTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card></>}
-        {undatedTodos.length>0&&<><GroupLabel>No Date</GroupLabel><Card>{undatedTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card></>}
+        {overdueTodos.length>0&&<><GroupLabel color={T.danger}>Overdue</GroupLabel><Card>{overdueTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onEditMember={editTodoMember} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card></>}
+        {thisWeekTodos.length>0&&<><GroupLabel>This Week</GroupLabel><Card>{thisWeekTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onEditMember={editTodoMember} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card></>}
+        {upcomingTodos.length>0&&<><GroupLabel>Upcoming</GroupLabel><Card>{upcomingTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onEditMember={editTodoMember} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card></>}
+        {undatedTodos.length>0&&<><GroupLabel>No Date</GroupLabel><Card>{undatedTodos.map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onEditMember={editTodoMember} onProjectNav={i=>{setActiveIdx(i);setView("project");}} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card></>}
         {pendingTodos.length===0&&<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>All caught up.</p></Card>}
       </>) : (
-        doneTodos.length===0?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No completed tasks yet.</p></Card>:<Card>{[...doneTodos].reverse().map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card>
+        doneTodos.length===0?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No completed tasks yet.</p></Card>:<Card>{[...doneTodos].reverse().map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onEditMember={editTodoMember} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}</Card>
       )}
     </Shell>
     );
@@ -2352,18 +2428,35 @@ ${summary}`,500);
       {todos.filter(t=>t.projectId===activeProject.id&&!t.done).length>0&&(
         <Card>
           <h3 style={{margin:"0 0 8px",fontSize:"13px",fontWeight:600,color:T.ink}}>Open Tasks</h3>
-          {todos.filter(t=>t.projectId===activeProject.id&&!t.done).map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}
+          {todos.filter(t=>t.projectId===activeProject.id&&!t.done).map(t=><TodoItem key={t.id} todo={t} projects={projects} members={members} onToggle={toggleTodo} onDelete={deleteTodo} onEdit={editTodo} onEditMember={editTodoMember} onReassignProject={(id,cur)=>setReassignTodo({id,currentProjectId:cur})}/>)}
         </Card>
       )}
 
       <Card accent={pc(activeIdx)}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,flexWrap:"wrap",gap:6}}>
           <h2 style={{margin:0,fontFamily:T.serif,fontSize:"15px",fontWeight:700,color:T.ink}}>Project Status</h2>
-          {activeProject.status_updated_at&&<span style={{fontSize:"11px",color:T.muted}}>Updated {fmt(activeProject.status_updated_at)}</span>}
+          <div style={{display:"flex",gap:6,alignItems:"center"}}>
+            {activeProject.status_updated_at&&<span style={{fontSize:"11px",color:T.muted}}>Updated {fmt(activeProject.status_updated_at)}</span>}
+            {activeProject.notes.length>0&&<Btn size="sm" variant="secondary" onClick={async()=>{
+              setStatusRefreshing(true);
+              try{const s=await claude(`${projCtxPrefix(activeProject)}Write a concise project status update for "${activeProject.name}".\n${activeProject.notes.map((n,i)=>`Meeting ${i+1}:\n${n.summary}`).join("\n\n")}`,700);await db.updateProjectStatus(activeProject.id,s);await reload();}catch{}finally{setStatusRefreshing(false);}
+            }} disabled={statusRefreshing}>{statusRefreshing?"Refreshing…":"↻ Refresh"}</Btn>}
+            <Btn size="sm" variant="secondary" onClick={()=>setEditingStatus(!editingStatus)}>{editingStatus?"Cancel":"Edit"}</Btn>
+          </div>
         </div>
-        {activeProject.notes.length===0?<p style={{color:T.muted,fontSize:"13px",margin:0}}>Status generates after first note.</p>
+        {activeProject.notes.length===0
+          ?<p style={{color:T.muted,fontSize:"13px",margin:0}}>Status generates after first note.</p>
+          :editingStatus
+            ?<div>
+              <textarea defaultValue={activeProject.status||""} id="statusEditArea" style={{...inp,height:120,resize:"vertical",fontSize:"13px",lineHeight:1.6}} autoFocus/>
+              <div style={{marginTop:8,display:"flex",gap:6}}>
+                <Btn size="sm" onClick={async()=>{const val=document.getElementById("statusEditArea").value;await db.updateProjectStatus(activeProject.id,val);await reload();setEditingStatus(false);}}>Save</Btn>
+                <Btn size="sm" variant="secondary" onClick={()=>setEditingStatus(false)}>Cancel</Btn>
+              </div>
+            </div>
           :activeProject.status?<MD content={activeProject.status} small/>
-          :<p style={{color:T.muted,fontSize:"13px",margin:0}}>Status will appear after first note.</p>}
+          :<p style={{color:T.muted,fontSize:"13px",margin:0}}>Status will appear after first note.</p>
+        }
       </Card>
 
       <div style={{display:"flex",gap:0,borderBottom:`1px solid ${T.border}`,marginBottom:12,marginTop:4}}>
@@ -2380,13 +2473,15 @@ ${summary}`,500);
 
       {activeProjectTab==="notes"&&(
         activeProject.notes.length===0?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No notes yet.</p></Card>
-        :[...activeProject.notes].reverse().map(n=>{
+        :[...activeProject.notes].reverse().map((n,idx)=>{
           const tagged=(n.taggedMembers||[]).map(id=>members.find(m=>m.id===id)).filter(Boolean);
+          const isLatest=idx===0;
           return(
-            <Card key={n.id}>
+            <Card key={n.id} style={isLatest?{borderLeft:`3px solid ${T.accent}`,background:"#FAFBFF"}:{}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6,gap:6}}>
                 <div style={{minWidth:0}}>
                   <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                    {isLatest&&<span style={{fontSize:"10px",fontWeight:700,color:T.accent,background:T.accentLight,padding:"2px 7px",borderRadius:2,letterSpacing:"0.04em"}}>LATEST</span>}
                     <span style={{fontSize:"12px",color:T.muted}}>{fmt(n.date)}</span>
                     {n.qualityScore&&<ScoreBadge score={n.qualityScore.score}/>}
                     {n.qualityScore&&<span style={{fontSize:"11px",color:T.muted}}>{n.qualityScore.feedback}</span>}
@@ -2400,7 +2495,10 @@ ${summary}`,500);
                   <Btn variant="danger" size="sm" onClick={()=>deleteNote(n.id)}>Del</Btn>
                 </div>
               </div>
-              {expandedNote===n.id?<div style={{borderTop:`1px solid ${T.border}`,paddingTop:10}}><MD content={n.summary} small/></div>:<p style={{fontSize:"12px",color:T.muted,margin:0,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{n.summary.replace(/[#*]/g,"").slice(0,110)}…</p>}
+              {expandedNote===n.id||isLatest
+                ?<div style={{borderTop:`1px solid ${T.border}`,paddingTop:10}}><MD content={n.summary} small/></div>
+                :<p style={{fontSize:"12px",color:T.muted,margin:0,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{n.summary.replace(/[#*]/g,"").slice(0,110)}…</p>
+              }
             </Card>
           );
         })
@@ -2540,7 +2638,7 @@ ${summary}`,500);
       <Nav/>
       <button onClick={()=>{setView("project");setNotePhase("input");}} style={{fontSize:"12px",color:T.mid,background:"none",border:"none",cursor:"pointer",padding:"0 0 16px",fontFamily:T.sans}}>← {activeProject?.name}</button>
       {notePhase==="input"&&(
-        <NoteTextarea onSubmit={analyseNote} onCancel={()=>{setView("project");setNotePhase("input");}} loading={loading} error={error} projectName={activeProject?.name} meName={data.me||"me"} members={members}/>
+        <NoteTextarea onSubmit={analyseNote} onCancel={()=>{setView("project");setNotePhase("input");}} loading={loading} error={error} projectName={activeProject?.name} meName={data.me||"me"} members={members} onNewMember={(names,onConfirm)=>setNewMemberPrompt({names,onConfirm})}/>
       )}
       {notePhase==="clarifying"&&(
         <Card>
