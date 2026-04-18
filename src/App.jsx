@@ -1212,12 +1212,18 @@ export default function App() {
   const [showAllProjects,setShowAllProjects]=useState(false);
   const [goals,setGoals]=useState([]);
   const [goalLinks,setGoalLinks]=useState([]);
-  const [contextSuggestion,setContextSuggestion]=useState(null); // {projectId, suggestion}
-  const [crossRisks,setCrossRisks]=useState([]); // [{theme, projects, riskTexts}]
+  const [contextSuggestion,setContextSuggestion]=useState(null);
+  const [crossRisks,setCrossRisks]=useState([]);
   const [newGoalTitle,setNewGoalTitle]=useState("");
   const [newGoalDesc,setNewGoalDesc]=useState("");
   const [newGoalDate,setNewGoalDate]=useState("");
   const [editingGoalId,setEditingGoalId]=useState(null);
+  const [decFilter,setDecFilter]=useState("__all__");
+  const [decSearch,setDecSearch]=useState("");
+  const [nudgeOpen,setNudgeOpen]=useState(false);
+  const [pricingIndia,setPricingIndia]=useState(false);
+  const [annual,setAnnual]=useState(true);
+  useEffect(()=>{ fetch("https://ipapi.co/json/").then(r=>r.json()).then(d=>{ if(d.country_code==="IN") setPricingIndia(true); }).catch(()=>{}); },[]);
 
   const taggedMembersRef=useRef([]);
   const taggedSelfRef=useRef(false);
@@ -1650,8 +1656,6 @@ ${summary}`,500);
   // ── DECISIONS ─────────────────────────────────────────────────────────────
   if(view==="decisions") {
     const allDecisions = projects.flatMap(p=>(p.decisions||[]).map(d=>({...d,projectName:p.name,projIdx:projects.findIndex(pp=>pp.id===p.id)})));
-    const [decFilter,setDecFilter]=useState("__all__");
-    const [decSearch,setDecSearch]=useState("");
     const filtered = allDecisions.filter(d=>(decFilter==="__all__"||d.project_id===decFilter)&&(decSearch===""||d.decision_text?.toLowerCase().includes(decSearch.toLowerCase())));
     const sorted = [...filtered].sort((a,b)=>new Date(b.date)-new Date(a.date));
     return (
@@ -1683,14 +1687,10 @@ ${summary}`,500);
 
   // ── GOALS ─────────────────────────────────────────────────────────────────
   if(view==="goals") {
-    const [editGoal,setEditGoal]=useState(null);
-    const [newTitle,setNewTitle]=useState("");
-    const [newDesc,setNewDesc]=useState("");
-    const [newDate,setNewDate]=useState("");
     const createGoal=async()=>{
-      if(!newTitle.trim()||!userId)return;
-      const g=await db.createGoal(userId,{title:newTitle.trim(),description:newDesc.trim(),targetDate:newDate||null,owner:data.me||""});
-      setGoals(gs=>[g,...gs]); setNewTitle(""); setNewDesc(""); setNewDate("");
+      if(!newGoalTitle.trim()||!userId)return;
+      const g=await db.createGoal(userId,{title:newGoalTitle.trim(),description:newGoalDesc.trim(),targetDate:newGoalDate||null,owner:data.me||""});
+      setGoals(gs=>[g,...gs]); setNewGoalTitle(""); setNewGoalDesc(""); setNewGoalDate("");
     };
     const deleteGoal=async(id)=>{if(!window.confirm("Delete this goal?"))return;await db.deleteGoal(id);setGoals(gs=>gs.filter(g=>g.id!==id));setGoalLinks(ls=>ls.filter(l=>l.goal_id!==id));};
     const toggleLink=async(goalId,projectId,linked)=>{
@@ -1703,10 +1703,10 @@ ${summary}`,500);
         <SectionTitle sub="Company-level goals. Link projects to see how work rolls up.">Goals</SectionTitle>
         <Card style={{marginBottom:12}}>
           <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-end"}}>
-            <div style={{flex:"1 1 160px"}}><Label>Goal title</Label><input value={newTitle} onChange={e=>setNewTitle(e.target.value)} placeholder="e.g. Digital Backbone by Q3" onKeyDown={e=>e.key==="Enter"&&createGoal()} style={inp}/></div>
-            <div style={{flex:"1 1 120px"}}><Label>Description</Label><input value={newDesc} onChange={e=>setNewDesc(e.target.value)} placeholder="Optional" style={inp}/></div>
-            <div style={{flex:"0 0 auto"}}><Label>Target date</Label><input type="date" value={newDate} onChange={e=>setNewDate(e.target.value)} style={{...inp,width:"auto"}}/></div>
-            <Btn onClick={createGoal} disabled={!newTitle.trim()}>+ Add goal</Btn>
+            <div style={{flex:"1 1 160px"}}><Label>Goal title</Label><input value={newGoalTitle} onChange={e=>setNewGoalTitle(e.target.value)} placeholder="e.g. Digital Backbone by Q3" onKeyDown={e=>e.key==="Enter"&&createGoal()} style={inp}/></div>
+            <div style={{flex:"1 1 120px"}}><Label>Description</Label><input value={newGoalDesc} onChange={e=>setNewGoalDesc(e.target.value)} placeholder="Optional" style={inp}/></div>
+            <div style={{flex:"0 0 auto"}}><Label>Target date</Label><input type="date" value={newGoalDate} onChange={e=>setNewGoalDate(e.target.value)} style={{...inp,width:"auto"}}/></div>
+            <Btn onClick={createGoal} disabled={!newGoalTitle.trim()}>+ Add goal</Btn>
           </div>
         </Card>
         {goals.length===0?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>No goals yet. Add your first company goal above.</p></Card>
@@ -1768,9 +1768,6 @@ ${summary}`,500);
   if(view==="pricing") {
     const gumroadIndia = "https://getdebriefs.gumroad.com/l/fpnhta";
     const gumroadIntl  = "https://getdebriefs.gumroad.com/l/duddlw";
-    const [pricingIndia,setPricingIndia]=useState(false);
-    const [annual,setAnnual]=useState(true);
-    useEffect(()=>{ fetch("https://ipapi.co/json/").then(r=>r.json()).then(d=>{ if(d.country_code==="IN") setPricingIndia(true); }).catch(()=>{}); },[]);
     const gumLink = pricingIndia ? gumroadIndia : gumroadIntl;
     const price = annual ? (pricingIndia?"₹2,999":"$99") : (pricingIndia?"₹299":"$9");
     const period = annual ? "/year" : "/month";
@@ -1865,14 +1862,13 @@ ${summary}`,500);
       {(()=>{
         const overdue = projects.flatMap(p=>(p.commitments||[]).filter(c=>c.status==="open"&&c.date&&Math.floor((Date.now()-new Date(c.date))/(1000*60*60*24))>7).map(c=>({...c,projName:p.name,days:Math.floor((Date.now()-new Date(c.date))/(1000*60*60*24))})));
         if(!overdue.length) return null;
-        const [open,setOpen]=useState(false);
         return (
           <div style={{background:"#FEF3C7",border:"1px solid #F59E0B",borderLeft:"3px solid #F59E0B",padding:"10px 16px",marginBottom:10,fontFamily:T.sans}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
               <span style={{fontSize:"13px",fontWeight:600,color:"#92400E"}}>⚡ {overdue.length} overdue commitment{overdue.length>1?"s":""} need attention</span>
-              <button onClick={()=>setOpen(o=>!o)} style={{background:"none",border:"none",cursor:"pointer",fontSize:"12px",color:"#92400E",fontFamily:T.sans}}>{open?"Hide ▲":"Review ▼"}</button>
+              <button onClick={()=>setNudgeOpen(o=>!o)} style={{background:"none",border:"none",cursor:"pointer",fontSize:"12px",color:"#92400E",fontFamily:T.sans}}>{nudgeOpen?"Hide ▲":"Review ▼"}</button>
             </div>
-            {open&&overdue.map(c=>(
+            {nudgeOpen&&overdue.map(c=>(
               <div key={c.id} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0",borderBottom:`1px solid #F59E0B30`}}>
                 <span style={{fontSize:"12px",color:"#92400E",flex:1}}>{c.commitment_text} <span style={{color:T.muted}}>· {c.projName} · {c.days}d ago</span></span>
                 <button onClick={()=>db.updateCommitmentStatus(c.id,"done").then(reload)} style={{background:"none",border:"none",fontSize:"11px",color:"#16A34A",cursor:"pointer",padding:0,fontFamily:T.sans,whiteSpace:"nowrap"}}>Mark done</button>
