@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { supabase } from "./AuthWrapper.jsx";
 
+const ADMIN_EMAIL = "singhpunyadeep@gmail.com";
+const TRIAL_DAYS = 30;
+
 const T = {
   bg: "#F5F4F0", white: "#FFFFFF", ink: "#1A1A1A", mid: "#6B6B6B",
   muted: "#A8A8A8", border: "#E0DFDB", accent: "#003366",
@@ -54,6 +57,30 @@ const sanitiseHtml = html =>
 // ─── DB ───────────────────────────────────────────────────────────────────────
 const db = {
   async getUser() { const {data:{user}}=await supabase.auth.getUser(); return user; },
+  async loadProfile(userId) {
+    const {data} = await supabase.from('profiles').select('*').eq('id',userId).single();
+    return data || null;
+  },
+  async ensureProfile(user) {
+    // Insert if not exists (fallback if trigger didn't fire)
+    const existing = await this.loadProfile(user.id);
+    if(existing) return existing;
+    const {data} = await supabase.from('profiles').insert({id:user.id,email:user.email}).select().single();
+    return data;
+  },
+  async loadAllProfiles() {
+    const {data} = await supabase.from('profiles').select('*').order('created_at',{ascending:false});
+    return data || [];
+  },
+  async setProfileFlag(userId, flag, value) {
+    const update = {};
+    update[flag] = value;
+    if(flag==='is_paid' && value) update.paid_at = new Date().toISOString();
+    await supabase.from('profiles').update(update).eq('id',userId);
+  },
+  async setProfileTrialStart(userId, date) {
+    await supabase.from('profiles').update({trial_started_at:date}).eq('id',userId);
+  },
 
   async loadAll(userId) {
     const safe = async (fn) => { try { return await fn(); } catch { return null; } };
@@ -1270,6 +1297,9 @@ export default function App() {
   const [newMemberPrompt,setNewMemberPrompt]=useState(null); // {names,onConfirm}
   const [editingStatus,setEditingStatus]=useState(false);
   const [statusRefreshing,setStatusRefreshing]=useState(false);
+  const [profile,setProfile]=useState(null);
+  const [userEmail,setUserEmail]=useState("");
+  const [allProfiles,setAllProfiles]=useState([]); // admin only
   const [pricingIndia,setPricingIndia]=useState(false);
   const [annual,setAnnual]=useState(true);
   useEffect(()=>{ fetch("https://ipapi.co/json/").then(r=>r.json()).then(d=>{ if(d.country_code==="IN") setPricingIndia(true); }).catch(()=>{}); },[]);
@@ -1278,7 +1308,7 @@ export default function App() {
   const taggedSelfRef=useRef(false);
 
   useEffect(()=>{
-    db.getUser().then(user=>{ if(user){ setUserId(user.id); db.loadAll(user.id).then(d=>{ setData(d); if(d.me)setMeName(d.me); if(d.me&&!d.tourDone)setShowTour(true); }); db.loadGoals(user.id).then(({goals,links})=>{setGoals(goals);setGoalLinks(links);}); } });
+    db.getUser().then(user=>{ if(user){ setUserId(user.id); setUserEmail(user.email||""); db.loadAll(user.id).then(d=>{ setData(d); if(d.me)setMeName(d.me); if(d.me&&!d.tourDone)setShowTour(true); }); db.loadGoals(user.id).then(({goals,links})=>{setGoals(goals);setGoalLinks(links);}); db.ensureProfile(user).then(p=>setProfile(p)); } });
   },[]);
   useEffect(()=>{
     const h=e=>{ if(e.key==="k"&&(e.metaKey||e.ctrlKey)){e.preventDefault();setShowSearch(s=>!s);} };
@@ -1679,6 +1709,7 @@ ${summary}`,500);
         )}
         <div id="tour-project"><Btn size="sm" onClick={()=>{setNewProjName("");setNewProjContext("");setNewProjDeadline("");setView("newProject");}}>+ Project</Btn></div>
         <Btn size="sm" variant="secondary" onClick={()=>setView("pricing")} style={{fontSize:"11px",padding:"4px 7px"}}>Pricing</Btn>
+        {isAdmin&&<Btn size="sm" variant="secondary" onClick={()=>setView("admin")} style={{fontSize:"11px",padding:"4px 7px",borderColor:"#3B82F6",color:"#3B82F6"}}>Admin</Btn>}
         <Btn size="sm" variant="secondary" onClick={signOut} style={{fontSize:"11px",padding:"4px 7px"}}>Sign out</Btn>
       </div>
     </div>
@@ -1839,6 +1870,72 @@ ${summary}`,500);
     );
   }
 
+  // ── Trial / access computation ──────────────────────────────────────────────
+  const isAdmin = userEmail === ADMIN_EMAIL;
+  const trialStart = profile?.trial_started_at ? new Date(profile.trial_started_at) : null;
+  const daysSinceTrialStart = trialStart ? Math.floor((Date.now() - trialStart.getTime())/(1000*60*60*24)) : 0;
+  const trialDaysLeft = trialStart ? Math.max(0, TRIAL_DAYS - daysSinceTrialStart) : TRIAL_DAYS;
+  const isPaid = !!profile?.is_paid;
+  const isFreeForever = !!profile?.is_free_forever;
+  const hasAccess = isPaid || isFreeForever || isAdmin || trialDaysLeft > 0;
+  const trialExpired = !hasAccess;
+
+  // ── ADMIN VIEW ──────────────────────────────────────────────────────────────
+  if(view==="admin") {
+    if(!isAdmin) return <Shell><Card><p style={{color:T.muted,fontSize:"13px"}}>Not authorized.</p><Btn onClick={()=>setView("home")} style={{marginTop:8}}>Back</Btn></Card></Shell>;
+    return (
+      <Shell>
+        <Nav/>
+        <SectionTitle sub="Manage user access. Click flags to toggle.">Admin · Users</SectionTitle>
+        <Card style={{marginBottom:12}}>
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            <Btn size="sm" onClick={async()=>{const profs=await db.loadAllProfiles();setAllProfiles(profs);setToast(`Loaded ${profs.length} users`);}}>↻ Refresh users</Btn>
+            <span style={{fontSize:"12px",color:T.muted}}>{allProfiles.length} loaded</span>
+          </div>
+        </Card>
+        {allProfiles.length===0?<Card><p style={{color:T.muted,fontSize:"13px",margin:0}}>Click Refresh to load users.</p></Card>
+        :allProfiles.map(p=>{
+          const start=p.trial_started_at?new Date(p.trial_started_at):null;
+          const days=start?Math.floor((Date.now()-start.getTime())/(1000*60*60*24)):0;
+          const left=Math.max(0,TRIAL_DAYS-days);
+          const status=p.is_paid?"PAID":p.is_free_forever?"FREE FOREVER":left>0?`Trial · ${left}d left`:"EXPIRED";
+          const statusColor=p.is_paid?"#16A34A":p.is_free_forever?"#3B82F6":left>7?T.muted:left>0?"#F59E0B":"#DC2626";
+          return (
+            <Card key={p.id} style={{marginBottom:8,borderLeft:`3px solid ${statusColor}`}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+                <div style={{minWidth:0,flex:1}}>
+                  <div style={{fontSize:"13px",fontWeight:600,color:T.ink,wordBreak:"break-all"}}>{p.email||"(no email)"}</div>
+                  <div style={{fontSize:"11px",color:T.muted}}>Joined {fmt(p.created_at)} · Trial start {start?fmt(start):"—"}</div>
+                </div>
+                <div style={{display:"flex",gap:6,flexShrink:0,alignItems:"center"}}>
+                  <span style={{fontSize:"11px",fontWeight:700,color:statusColor,padding:"3px 8px",background:statusColor+"15",borderRadius:2}}>{status}</span>
+                  <button onClick={async()=>{await db.setProfileFlag(p.id,"is_paid",!p.is_paid);const profs=await db.loadAllProfiles();setAllProfiles(profs);}} style={{fontSize:"11px",padding:"3px 8px",border:`1px solid ${T.border}`,background:p.is_paid?"#16A34A":"transparent",color:p.is_paid?"#fff":T.mid,borderRadius:2,cursor:"pointer",fontFamily:T.sans}}>Paid</button>
+                  <button onClick={async()=>{await db.setProfileFlag(p.id,"is_free_forever",!p.is_free_forever);const profs=await db.loadAllProfiles();setAllProfiles(profs);}} style={{fontSize:"11px",padding:"3px 8px",border:`1px solid ${T.border}`,background:p.is_free_forever?"#3B82F6":"transparent",color:p.is_free_forever?"#fff":T.mid,borderRadius:2,cursor:"pointer",fontFamily:T.sans}}>Free forever</button>
+                  <button onClick={async()=>{if(!window.confirm("Reset trial start to now?"))return;await db.setProfileTrialStart(p.id,new Date().toISOString());const profs=await db.loadAllProfiles();setAllProfiles(profs);}} style={{fontSize:"11px",padding:"3px 8px",border:`1px solid ${T.border}`,background:"transparent",color:T.mid,borderRadius:2,cursor:"pointer",fontFamily:T.sans}}>Reset trial</button>
+                </div>
+              </div>
+            </Card>
+          );
+        })}
+      </Shell>
+    );
+  }
+
+  // ── TRIAL EXPIRED — soft paywall for create actions ─────────────────────────
+  if(trialExpired && (view==="addNote"||view==="newProject")) return (
+    <Shell maxW={500}>
+      <Nav/>
+      <Card accent={T.danger} style={{textAlign:"center"}}>
+        <div style={{fontSize:"40px",marginBottom:12}}>🔒</div>
+        <h2 style={{margin:"0 0 8px",fontFamily:T.serif,fontSize:"22px",color:T.ink}}>Your free trial has ended</h2>
+        <p style={{margin:"0 0 18px",fontSize:"13px",color:T.muted,lineHeight:1.6}}>You can still view your existing projects, notes, decisions and tasks.<br/>To add new ones, please subscribe.</p>
+        <Btn onClick={()=>window.open(pricingIndia?"https://getdebriefs.gumroad.com/l/fpnhta":"https://getdebriefs.gumroad.com/l/duddlw","_blank")} style={{padding:"10px 24px",fontSize:"14px"}}>Subscribe — {pricingIndia?"₹299/month or ₹2,999/year":"$9/month or $99/year"}</Btn>
+        <p style={{margin:"12px 0 0",fontSize:"11px",color:T.muted}}>Already paid? Email <a href="mailto:hello@getdebriefs.com" style={{color:T.accent}}>hello@getdebriefs.com</a></p>
+        <div style={{marginTop:16}}><Btn variant="secondary" size="sm" onClick={()=>setView("home")}>Back</Btn></div>
+      </Card>
+    </Shell>
+  );
+
   if(view==="score") return <ScorePage userId={userId} todos={todos} data={data} onBack={()=>setView("home")}/>;
 
   if(view==="pricing") {
@@ -1933,6 +2030,21 @@ ${summary}`,500);
           </Card>
         );
       })()}
+
+      {/* Trial status banner */}
+      {profile&&!isPaid&&!isFreeForever&&!isAdmin&&trialDaysLeft<=14&&(
+        <div style={{background:trialDaysLeft===0?"#FEE2E2":trialDaysLeft<=7?"#FEF3C7":"#EFF6FF",border:`1px solid ${trialDaysLeft===0?"#FECACA":trialDaysLeft<=7?"#F59E0B":"#BFDBFE"}`,borderLeft:`3px solid ${trialDaysLeft===0?"#DC2626":trialDaysLeft<=7?"#F59E0B":"#3B82F6"}`,padding:"10px 16px",marginBottom:10,fontFamily:T.sans,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+          <div>
+            <span style={{fontSize:"13px",fontWeight:600,color:trialDaysLeft===0?"#991B1B":trialDaysLeft<=7?"#92400E":"#1E40AF"}}>
+              {trialDaysLeft===0?"🔒 Your free trial has ended":trialDaysLeft===1?"⏰ Last day of your free trial":`⏰ ${trialDaysLeft} days left in your free trial`}
+            </span>
+            <p style={{margin:"2px 0 0",fontSize:"11px",color:T.muted}}>
+              {trialDaysLeft===0?"You can still view your data. Subscribe to add new notes, projects, or tasks.":"Subscribe now to keep adding notes, projects, and tasks after your trial ends."}
+            </p>
+          </div>
+          <Btn size="sm" onClick={()=>window.open(pricingIndia?"https://getdebriefs.gumroad.com/l/fpnhta":"https://getdebriefs.gumroad.com/l/duddlw","_blank")}>Subscribe — {pricingIndia?"₹299/mo":"$9/mo"}</Btn>
+        </div>
+      )}
 
       {/* #3 Commitment nudges */}
       {(()=>{
